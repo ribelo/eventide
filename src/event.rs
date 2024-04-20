@@ -1,102 +1,185 @@
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
 use dyn_clone::DynClone;
-use std::{any::TypeId, fmt, marker::PhantomData, sync::Arc};
+use std::{any::TypeId, fmt, future::Future, marker::PhantomData, sync::Arc};
 
-use crate::eve::{Eve, ToSnapshot};
+use crate::eve::Eve;
 
 pub trait Eventable: fmt::Debug + Send + Sync + DowncastSync + DynClone + 'static {}
 impl_downcast!(sync Eventable);
 dyn_clone::clone_trait_object!(Eventable);
-impl<T> Eventable for T where T: fmt::Debug + Send + Sync + Clone + 'static {}
+impl<T> Eventable for T where T: fmt::Debug + Send + Sync + DynClone + 'static {}
 
 #[derive(Debug, Clone)]
-pub struct Event {
+pub struct SystemEvent {
     pub id: TypeId,
-    pub inner: Arc<dyn Eventable>,
+    pub data: Arc<dyn Eventable>,
 }
 
-impl Event {
+impl SystemEvent {
     pub fn new<T>(event: T) -> Self
     where
         T: Eventable,
     {
-        Event {
+        SystemEvent {
             id: TypeId::of::<T>(),
-            inner: Arc::new(event),
+            data: Arc::new(event),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SideEffect {
+    pub id: TypeId,
+    pub data: Arc<dyn Eventable>,
+}
+
+impl SideEffect {
+    pub fn new<T>(event: T) -> Self
+    where
+        T: Eventable,
+    {
+        SideEffect {
+            id: TypeId::of::<T>(),
+            data: Arc::new(event),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    System(SystemEvent),
+    SideEffect(SideEffect),
+}
+
+impl Event {
+    pub fn system<T>(event: T) -> Self
+    where
+        T: Eventable,
+    {
+        Event::System(SystemEvent::new(event))
+    }
+    pub fn side_effect<T>(event: T) -> Self
+    where
+        T: Eventable,
+    {
+        Event::SideEffect(SideEffect::new(event))
+    }
+}
+
+impl From<SystemEvent> for Event {
+    fn from(event: SystemEvent) -> Self {
+        Event::System(event)
+    }
+}
+
+impl From<SideEffect> for Event {
+    fn from(event: SideEffect) -> Self {
+        Event::SideEffect(event)
     }
 }
 
 pub struct Events(pub Vec<Event>);
 
-pub trait FromEve<'a, A>: Send + Sync
-where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-{
-    fn from_eve(eve: &'a Eve<A>) -> Self;
-}
-
-pub trait ReadHandler<A, E>: Send + Sync + DynClone
-where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-{
-    fn read(&self, event: &E, snap: <A as ToSnapshot>::Snapshot) -> Option<Events>;
-}
-dyn_clone::clone_trait_object!(<A, E> ReadHandler<A, E>);
-
-// macro_rules! tuple_impls {
-//     ($($t:ident),*; $f:ident) => {
-//         #[async_trait]
-//         impl<S, $($t),*, $f, Fut> EventHandler< S, ($($t,)*)> for $f
-//         where
-//             S: Send + Sync + Clone + 'static,
-//             $f: Fn($($t),*) -> Fut + Send + Sync + Clone,
-//             $($t: FromEventContext<S>,)*
-//             Fut: Future<Output = ()> + Send,
-//         {
-//             async fn call(&self, context: &EventContext<S>) {
-//                 (self)($(<$t>::from_context(&context).await,)*).await;
-//             }
-//         }
-//     }
-// }
-//
-// macro_rules! impl_handler {
-//     (($($t:ident),*), $f:ident) => {
-//         tuple_impls!($($t),*; $f);
-//     };
-// }
-//
-// impl_handler!((T1), F);
-// impl_handler!((T1, T2), F);
-// impl_handler!((T1, T2, T3), F);
-// impl_handler!((T1, T2, T3, T4), F);
-// impl_handler!((T1, T2, T3, T4, T5), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7, T8), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7, T8, T9), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7, T8, T9, T10), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11), F);
-// impl_handler!((T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12), F);
-
-impl<A, E, F> ReadHandler<A, E> for F
-where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    F: Fn(&E, <A as ToSnapshot>::Snapshot) -> Option<Events> + Send + Sync + Clone,
-    E: Eventable,
-{
-    fn read(&self, event: &E, snap: <A as ToSnapshot>::Snapshot) -> Option<Events> {
-        (self)(event, snap)
+impl From<Vec<Event>> for Events {
+    fn from(events: Vec<Event>) -> Self {
+        Events(events)
     }
 }
 
+impl From<Event> for Events {
+    fn from(event: Event) -> Self {
+        Events(vec![event])
+    }
+}
+
+impl From<SystemEvent> for Events {
+    fn from(event: SystemEvent) -> Self {
+        Events(vec![Event::System(event)])
+    }
+}
+
+impl From<SideEffect> for Events {
+    fn from(event: SideEffect) -> Self {
+        Events(vec![Event::SideEffect(event)])
+    }
+}
+
+pub trait FromEve<A>: Send + Sync
+where
+    A: Send + Sync + Clone + 'static,
+{
+    fn from_eve(eve: Eve<A>) -> Self;
+}
+
+pub trait ReadHandler<A, E, T>: Send + Sync + DynClone
+where
+    A: Send + Sync + Clone + 'static,
+{
+    fn read(&self, event: &E, eve: Eve<A>) -> Option<Events>;
+}
+dyn_clone::clone_trait_object!(<A, E, T> ReadHandler<A, E, T>);
+
+macro_rules! impl_handler {
+    ($m:ident, ($($t:ident),*), $f:ident) => {
+        $m!($($t),*; $f);
+    };
+}
+
+macro_rules! read_handler_tuple_impls {
+    ($($t:ident),*; $f:ident) => {
+        impl<A, E, $($t),*, $f> ReadHandler<A, E, ($($t,)*)> for $f
+        where
+            A: Send + Sync + Clone + 'static,
+            E: Eventable,
+            $f: Fn(&E, &A, $($t),*) -> Option<Events> + Send + Sync + Clone,
+            $($t: FromEve<A>,)*
+        {
+            fn read(&self, event: &E, eve: Eve<A>) -> Option<Events> {
+                (self)(event, &eve.app.read(), $(<$t>::from_eve(eve.clone()),)*)
+            }
+        }
+    }
+}
+
+impl_handler!(read_handler_tuple_impls, (T1), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2, T3), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2, T3, T4), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2, T3, T4, T5), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2, T3, T4, T5, T6), F);
+impl_handler!(read_handler_tuple_impls, (T1, T2, T3, T4, T5, T6, T7), F);
+impl_handler!(
+    read_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8),
+    F
+);
+impl_handler!(
+    read_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9),
+    F
+);
+impl_handler!(
+    read_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10),
+    F
+);
+impl_handler!(
+    read_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11),
+    F
+);
+impl_handler!(
+    read_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12),
+    F
+);
+
 pub trait ReadHandlerFn<A>: Send + Sync + DynClone
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
+    A: Send + Sync + Clone + 'static,
 {
-    fn read(&self, event: Arc<dyn Eventable>, snap: <A as ToSnapshot>::Snapshot) -> Option<Events>;
+    fn read(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events>;
 }
 dyn_clone::clone_trait_object!(<A> ReadHandlerFn<A>);
 
@@ -106,27 +189,27 @@ impl<A> fmt::Debug for dyn ReadHandlerFn<A> + Send + Sync {
     }
 }
 
-pub(crate) struct ReadHandlerWrapper<A, H, E>
+pub(crate) struct ReadHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: ReadHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: ReadHandler<A, E, T> + Copy,
 {
     pub handler: H,
-    pub phantom: PhantomData<(A, E)>,
+    pub phantom: PhantomData<(A, E, T)>,
 }
 
-impl<A, H, E> Copy for ReadHandlerWrapper<A, H, E>
+impl<A, H, E, T> Copy for ReadHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: ReadHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: ReadHandler<A, E, T> + Copy,
     E: Eventable,
 {
 }
 
-impl<A, H, E> Clone for ReadHandlerWrapper<A, H, E>
+impl<A, H, E, T> Clone for ReadHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: ReadHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: ReadHandler<A, E, T> + Copy,
     E: Eventable,
 {
     fn clone(&self) -> Self {
@@ -134,44 +217,84 @@ where
     }
 }
 
-impl<A, H, E> ReadHandlerFn<A> for ReadHandlerWrapper<A, H, E>
+impl<A, H, E, T> ReadHandlerFn<A> for ReadHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: ReadHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: ReadHandler<A, E, T> + Copy,
     E: Eventable,
+    T: Send + Sync,
 {
-    fn read(&self, event: Arc<dyn Eventable>, snap: <A as ToSnapshot>::Snapshot) -> Option<Events> {
+    fn read(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events> {
         event
             .downcast_ref::<E>()
-            .map(|event| self.handler.read(event, snap))
+            .map(|event| self.handler.read(event, eve))
             .unwrap()
     }
 }
 
-pub trait WriteHandler<A, T>: Send + Sync + DynClone
+pub trait WriteHandler<A, E, T>: Send + Sync + DynClone
 where
     A: Send + Sync + Clone + 'static,
 {
-    fn write(&self, event: &T, app: &mut A) -> Option<Events>;
+    fn write(&self, event: &E, eve: Eve<A>) -> Option<Events>;
 }
-dyn_clone::clone_trait_object!(<A, E> WriteHandler<A, E>);
+dyn_clone::clone_trait_object!(<A, E, T> WriteHandler<A, E, T>);
 
-impl<A, E, F> WriteHandler<A, E> for F
-where
-    A: Send + Sync + Clone + 'static,
-    F: Fn(&E, &mut A) -> Option<Events> + Send + Sync + Clone,
-    E: Eventable,
-{
-    fn write(&self, event: &E, app: &mut A) -> Option<Events> {
-        (self)(event, app)
+macro_rules! write_handler_tuple_impls {
+    ($($t:ident),*; $f:ident) => {
+        impl<A, E, $($t),*, $f> WriteHandler<A, E, ($($t,)*)> for $f
+        where
+            A: Send + Sync + Clone + 'static,
+            E: Eventable,
+            $f: Fn(&E, &mut A, $($t),*) -> Option<Events> + Send + Sync + Clone,
+            $($t: FromEve<A>,)*
+        {
+            fn write(&self, event: &E, eve: Eve<A>) -> Option<Events> {
+                let eve_clone = eve.clone();
+                (self)(event, &mut eve.app.write(), $(<$t>::from_eve(eve_clone.clone()),)*)
+            }
+        }
     }
 }
+
+impl_handler!(write_handler_tuple_impls, (T1), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2, T3), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2, T3, T4), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2, T3, T4, T5), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2, T3, T4, T5, T6), F);
+impl_handler!(write_handler_tuple_impls, (T1, T2, T3, T4, T5, T6, T7), F);
+impl_handler!(
+    write_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8),
+    F
+);
+impl_handler!(
+    write_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9),
+    F
+);
+impl_handler!(
+    write_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10),
+    F
+);
+impl_handler!(
+    write_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11),
+    F
+);
+impl_handler!(
+    write_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12),
+    F
+);
 
 pub trait WriteHandlerFn<A>: Send + Sync + DynClone
 where
     A: Send + Sync + Clone + 'static,
 {
-    fn write(&self, event: Arc<dyn Eventable>, app: &mut A) -> Option<Events>;
+    fn write(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events>;
 }
 dyn_clone::clone_trait_object!(<A> WriteHandlerFn<A>);
 
@@ -181,27 +304,27 @@ impl<A> fmt::Debug for dyn WriteHandlerFn<A> + Send + Sync {
     }
 }
 
-pub(crate) struct WriteHandlerWrapper<A, H, E>
+pub(crate) struct WriteHandlerWrapper<A, H, E, T>
 where
     A: Send + Sync + Clone + 'static,
-    H: WriteHandler<A, E> + Copy,
+    H: WriteHandler<A, E, T> + Copy,
 {
     pub handler: H,
-    pub phantom: PhantomData<(A, E)>,
+    pub phantom: PhantomData<(A, E, T)>,
 }
 
-impl<A, H, E> Copy for WriteHandlerWrapper<A, H, E>
+impl<A, H, E, T> Copy for WriteHandlerWrapper<A, H, E, T>
 where
     A: Send + Sync + Clone + 'static,
-    H: WriteHandler<A, E> + Copy,
+    H: WriteHandler<A, E, T> + Copy,
     E: Eventable,
 {
 }
 
-impl<A, H, E> Clone for WriteHandlerWrapper<A, H, E>
+impl<A, H, E, T> Clone for WriteHandlerWrapper<A, H, E, T>
 where
     A: Send + Sync + Clone + 'static,
-    H: WriteHandler<A, E> + Copy,
+    H: WriteHandler<A, E, T> + Copy,
     E: Eventable,
 {
     fn clone(&self) -> Self {
@@ -209,52 +332,91 @@ where
     }
 }
 
-impl<A, H, E> WriteHandlerFn<A> for WriteHandlerWrapper<A, H, E>
+impl<A, H, E, T> WriteHandlerFn<A> for WriteHandlerWrapper<A, H, E, T>
 where
     A: Send + Sync + Clone + 'static,
-    H: WriteHandler<A, E> + Copy,
+    H: WriteHandler<A, E, T> + Copy,
     E: Eventable,
+    T: Send + Sync,
 {
-    fn write(&self, event: Arc<dyn Eventable>, app: &mut A) -> Option<Events> {
+    fn write(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events> {
         event
             .downcast_ref::<E>()
-            .map(|event| self.handler.write(event, app))
+            .map(|event| self.handler.write(event, eve))
             .unwrap()
     }
 }
 
 #[async_trait]
-pub trait SideEffectHandler<A, E>: Send + Sync + DynClone
+pub trait SideEffectHandler<A, E, T>: Send + Sync + DynClone
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
+    A: Send + Sync + Clone + 'static,
 {
-    async fn side_effect(&self, event: E, snapshot: <A as ToSnapshot>::Snapshot) -> Option<Events>;
+    async fn side_effect(&self, event: &E, eve: Eve<A>) -> Option<Events>;
 }
-dyn_clone::clone_trait_object!(<A, E> SideEffectHandler<A, E>);
+dyn_clone::clone_trait_object!(<A, E, T> SideEffectHandler<A, E, T>);
 
-#[async_trait]
-impl<A, T, F, Fut> SideEffectHandler<A, T> for F
-where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    T: Eventable,
-    F: Fn(T, <A as ToSnapshot>::Snapshot) -> Fut + Send + Sync + Clone,
-    Fut: std::future::Future<Output = Option<Events>> + Send,
-{
-    async fn side_effect(&self, event: T, snap: <A as ToSnapshot>::Snapshot) -> Option<Events> {
-        (self)(event, snap).await
+macro_rules! side_effect_handler_tuple_impls {
+    ($($t:ident),*; $f:ident) => {
+        #[async_trait]
+        impl<A, E, Fut, $($t),*, $f> SideEffectHandler<A, E, ($($t,)*)> for $f
+        where
+            A: Send + Sync + Clone + 'static,
+            E: Eventable,
+            Fut: Future<Output = Option<Events>> + Send,
+            $f: Fn(&E, $($t),*) -> Fut + Send + Sync + Clone,
+            $($t: FromEve<A>,)*
+        {
+            async fn side_effect(&self, event: &E, eve: Eve<A>) -> Option<Events> {
+                (self)(event, $(<$t>::from_eve(eve.clone()),)*).await
+            }
+        }
     }
 }
+
+impl_handler!(side_effect_handler_tuple_impls, (T1), F);
+impl_handler!(side_effect_handler_tuple_impls, (T1, T2), F);
+impl_handler!(side_effect_handler_tuple_impls, (T1, T2, T3), F);
+impl_handler!(side_effect_handler_tuple_impls, (T1, T2, T3, T4), F);
+impl_handler!(side_effect_handler_tuple_impls, (T1, T2, T3, T4, T5), F);
+impl_handler!(side_effect_handler_tuple_impls, (T1, T2, T3, T4, T5, T6), F);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7),
+    F
+);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8),
+    F
+);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9),
+    F
+);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10),
+    F
+);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11),
+    F
+);
+impl_handler!(
+    side_effect_handler_tuple_impls,
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12),
+    F
+);
 
 #[async_trait]
 pub trait SideEffectHandlerFn<A>: Send + Sync + DynClone
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
+    A: Send + Sync + Clone + 'static,
 {
-    async fn side_effect(
-        &self,
-        event: Arc<dyn Eventable>,
-        snap: <A as ToSnapshot>::Snapshot,
-    ) -> Option<Events>;
+    async fn side_effect(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events>;
 }
 dyn_clone::clone_trait_object!(<A> SideEffectHandlerFn<A>);
 
@@ -264,27 +426,27 @@ impl<A> fmt::Debug for dyn SideEffectHandlerFn<A> + Send + Sync {
     }
 }
 
-pub(crate) struct SideEffectHandlerWrapper<A, H, E>
+pub(crate) struct SideEffectHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: SideEffectHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: SideEffectHandler<A, E, T> + Copy,
 {
     pub handler: H,
-    pub phantom: PhantomData<(A, E)>,
+    pub phantom: PhantomData<(A, E, T)>,
 }
 
-impl<A, H, E> Copy for SideEffectHandlerWrapper<A, H, E>
+impl<A, H, E, T> Copy for SideEffectHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: SideEffectHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: SideEffectHandler<A, E, T> + Copy,
     E: Eventable,
 {
 }
 
-impl<A, H, E> Clone for SideEffectHandlerWrapper<A, H, E>
+impl<A, H, E, T> Clone for SideEffectHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: SideEffectHandler<A, E> + Copy,
+    A: Send + Sync + Clone + 'static,
+    H: SideEffectHandler<A, E, T> + Copy,
     E: Eventable,
 {
     fn clone(&self) -> Self {
@@ -293,18 +455,46 @@ where
 }
 
 #[async_trait]
-impl<A, H, E> SideEffectHandlerFn<A> for SideEffectHandlerWrapper<A, H, E>
+impl<A, H, E, T> SideEffectHandlerFn<A> for SideEffectHandlerWrapper<A, H, E, T>
 where
-    A: Send + Sync + Clone + ToSnapshot + 'static,
-    H: SideEffectHandler<A, E> + Copy + Send + Sync,
+    A: Send + Sync + Clone + 'static,
+    H: SideEffectHandler<A, E, T> + Copy + Send + Sync,
     E: Eventable + Clone,
+    T: Send + Sync,
 {
-    async fn side_effect(
-        &self,
-        event: Arc<dyn Eventable>,
-        snapshot: <A as ToSnapshot>::Snapshot,
-    ) -> Option<Events> {
+    async fn side_effect(&self, event: Arc<dyn Eventable>, eve: Eve<A>) -> Option<Events> {
         let evt = event.downcast_ref::<E>().unwrap();
-        self.handler.side_effect(evt.clone(), snapshot).await
+        self.handler.side_effect(&evt, eve).await
+    }
+}
+
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct TestEvent {
+        value: i32,
+    }
+
+    #[test]
+    fn test_system_event_new() {
+        let event = TestEvent { value: 42 };
+        let system_event = SystemEvent::new(event);
+
+        assert_eq!(system_event.id, TypeId::of::<TestEvent>());
+
+        let event_data = system_event.data.downcast_ref::<TestEvent>().unwrap();
+        assert_eq!(event_data.value, 42);
+    }
+
+    #[test]
+    fn test_side_effect_new() {
+        let event = TestEvent { value: 123 };
+        let side_effect = SideEffect::new(event);
+
+        assert_eq!(side_effect.id, TypeId::of::<TestEvent>());
+
+        let event_data = side_effect.data.downcast_ref::<TestEvent>().unwrap();
+        assert_eq!(event_data.value, 123);
     }
 }

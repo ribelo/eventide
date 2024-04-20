@@ -19,6 +19,7 @@ parking_lot = { version = "0.12.1", features = [
   "deadlock_detection",
   "hardware-lock-elision",
 ] }
+slotmap = "1.0.7"
 
 [lints.clippy]
 all = { level = "warn", priority = -2 }
@@ -54,6 +55,7 @@ pedantic = { level = "warn", priority = -1 }
 # pedantic
 # This rule is too pedantic, I don't want to force this because naming things are hard.
 module_name_repetitions = "allow"
+similar-names = "allow"
 
 # All triggers are mostly ignored in this codebase, so this is ignored globally.
 struct_excessive_bools = "allow"
