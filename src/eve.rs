@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 use tracing::error;
 
-use crate::reactive::Reactive;
+use crate::reactive::Handler;
 use crate::BoxableValue;
 use crate::{
     errors::DispatchError,
@@ -36,10 +36,9 @@ pub struct EveBuilder<A: Send + Sync + Clone> {
     pub(crate) statuses: HashMap<u64, Arc<RwLock<NodeState>>>,
     pub(crate) sources: HashMap<u64, HashSet<u64>>,
     pub(crate) subscribers: HashMap<u64, HashSet<u64>>,
-    pub(crate) reactive: HashMap<TypeId, Arc<dyn Reactive<A>>>,
     pub(crate) values: HashMap<u64, NodeValue>,
-    pub(crate) subscription_mapping: HashMap<u64, TypeId>,
     pub(crate) subscriptions: HashMap<u64, Arc<dyn BoxableValue>>,
+    pub(crate) sub_handlers: HashMap<u64, Arc<dyn Handler<A>>>,
 }
 
 impl<A: Send + Sync + Clone + 'static> EveBuilder<A> {
@@ -60,10 +59,9 @@ impl<A: Send + Sync + Clone + 'static> EveBuilder<A> {
             statuses: HashMap::default(),
             sources: HashMap::default(),
             subscribers: HashMap::default(),
-            reactive: HashMap::default(),
             values: HashMap::default(),
-            subscription_mapping: HashMap::default(),
             subscriptions: HashMap::default(),
+            sub_handlers: HashMap::default(),
         }
     }
 
@@ -139,12 +137,11 @@ impl<A: Send + Sync + Clone + 'static> EveBuilder<A> {
             statuses: Arc::default(),
             sources: Arc::default(),
             subscribers: Arc::default(),
-            reactive: Arc::default(),
             values: Arc::default(),
-            subscription_mapping: Arc::default(),
             subscriptions: Arc::default(),
+            sub_handlers: Arc::default(),
         };
-        run_events_loop(self.incoming_rx, self.outgoing_rx, eve.clone());
+        run_event_loop(self.incoming_rx, self.outgoing_rx, eve.clone());
         eve
     }
 }
@@ -162,11 +159,9 @@ pub struct Eve<A: Send + Sync + Clone> {
     pub(crate) statuses: Arc<RwLock<HashMap<u64, NodeState>>>,
     pub(crate) sources: Arc<RwLock<HashMap<u64, HashSet<u64>>>>,
     pub(crate) subscribers: Arc<RwLock<HashMap<u64, HashSet<u64>>>>,
-    pub(crate) reactive: Arc<RwLock<HashMap<TypeId, Arc<dyn Reactive<A>>>>>,
     pub(crate) values: Arc<RwLock<HashMap<u64, NodeValue>>>,
-    pub(crate) subscription_mapping: Arc<RwLock<HashMap<u64, TypeId>>>,
-    // Props
     pub(crate) subscriptions: Arc<RwLock<HashMap<u64, Arc<dyn BoxableValue>>>>,
+    pub(crate) sub_handlers: Arc<RwLock<HashMap<u64, Arc<dyn Handler<A>>>>>,
 }
 
 impl<A> Eve<A>
@@ -214,7 +209,7 @@ where
     }
 }
 
-fn run_events_loop<S>(
+fn run_event_loop<S>(
     mut input_rx: tokio::sync::mpsc::UnboundedReceiver<SystemEvent>,
     mut output_rx: tokio::sync::mpsc::UnboundedReceiver<SideEffect>,
     eve: Eve<S>,
