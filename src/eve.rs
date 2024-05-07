@@ -1,280 +1,220 @@
-use std::{any::TypeId, marker::PhantomData, sync::Arc};
+use std::{panic::AssertUnwindSafe, sync::Arc};
 
-use parking_lot::Mutex;
 use parking_lot::RwLock;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
-use tracing::error;
 
-use crate::reactive::Handler;
-use crate::BoxableValue;
-use crate::{
-    errors::DispatchError,
-    event::{
-        Event, Eventable, ReadHandler, ReadHandlerFn, ReadHandlerWrapper, SideEffect,
-        SideEffectHandler, SideEffectHandlerFn, SideEffectHandlerWrapper, SystemEvent,
-        WriteHandler, WriteHandlerFn, WriteHandlerWrapper,
-    },
-    reactive::{NodeState, NodeValue},
-};
+use crate::event::{EffectContext, EffectHandler, EffectMsg, EventHandler, EventMsg, Message};
 
-pub type ReadHandlers<A> = HashMap<TypeId, Vec<Box<dyn ReadHandlerFn<A> + Send + Sync>>>;
-pub type WriteHandlers<A> = HashMap<TypeId, Vec<Box<dyn WriteHandlerFn<A> + Send + Sync>>>;
-pub type SideEffectHandlers<A> =
-    HashMap<TypeId, Vec<Box<dyn SideEffectHandlerFn<A> + Send + Sync>>>;
+pub trait Eventide: Sized + 'static {
+    type Model: Send + Sync + 'static;
+    type Capabilities: Send + Sync + 'static;
+    type Event: EventHandler<Self> + Send + 'static;
+    type Effect: EffectHandler<Self> + Send + 'static;
 
-#[derive(Debug)]
-pub struct EveBuilder<A: Send + Sync + Clone> {
-    pub app: A,
-    pub(crate) incoming_tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>,
-    pub(crate) incoming_rx: tokio::sync::mpsc::UnboundedReceiver<SystemEvent>,
-    pub(crate) outgoing_tx: tokio::sync::mpsc::UnboundedSender<SideEffect>,
-    pub(crate) outgoing_rx: tokio::sync::mpsc::UnboundedReceiver<SideEffect>,
-    pub(crate) read_handlers: ReadHandlers<A>,
-    pub(crate) write_handlers: WriteHandlers<A>,
-    pub(crate) side_effect_handlers: SideEffectHandlers<A>,
-    //Reactively
-    pub(crate) statuses: HashMap<u64, Arc<RwLock<NodeState>>>,
-    pub(crate) sources: HashMap<u64, HashSet<u64>>,
-    pub(crate) subscribers: HashMap<u64, HashSet<u64>>,
-    pub(crate) values: HashMap<u64, NodeValue>,
-    pub(crate) subscriptions: HashMap<u64, Arc<dyn BoxableValue>>,
-    pub(crate) sub_handlers: HashMap<u64, Arc<dyn Handler<A>>>,
-}
+    fn run(model: Self::Model, caps: Self::Capabilities) -> Eve<Self> {
+        let (incoming_tx, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let state = Arc::new(RwLock::new(model));
 
-impl<A: Send + Sync + Clone + 'static> EveBuilder<A> {
-    pub fn new(app: A) -> Self {
-        let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        Self {
-            app,
-            incoming_tx: input_tx,
-            incoming_rx: input_rx,
-            outgoing_tx: output_tx,
-            outgoing_rx: output_rx,
-            read_handlers: HashMap::default(),
-            write_handlers: HashMap::default(),
-            side_effect_handlers: HashMap::default(),
-
-            statuses: HashMap::default(),
-            sources: HashMap::default(),
-            subscribers: HashMap::default(),
-            values: HashMap::default(),
-            subscriptions: HashMap::default(),
-            sub_handlers: HashMap::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn reg_read_handler<E, H, T>(mut self, handler: H) -> Self
-    where
-        E: Eventable,
-        H: ReadHandler<A, E, T> + Copy + 'static,
-        T: Send + Sync + 'static,
-    {
-        let id = TypeId::of::<E>();
-        let wrapper = ReadHandlerWrapper {
-            handler,
-            phantom: PhantomData::<(A, E, T)>,
-        };
-        self.read_handlers
-            .entry(id)
-            .or_default()
-            .push(Box::new(wrapper));
-
-        self
-    }
-
-    #[must_use]
-    pub fn reg_write_handler<E, H, T>(mut self, handler: H) -> Self
-    where
-        E: Eventable,
-        H: WriteHandler<A, E, T> + Copy + 'static,
-        T: Send + Sync + 'static,
-    {
-        let id = TypeId::of::<E>();
-        let wrapper = WriteHandlerWrapper {
-            handler,
-            phantom: PhantomData::<(A, E, T)>,
-        };
-        self.write_handlers
-            .entry(id)
-            .or_default()
-            .push(Box::new(wrapper));
-
-        self
-    }
-
-    #[must_use]
-    pub fn reg_side_effect_handler<E, H, T>(mut self, handler: H) -> Self
-    where
-        E: Eventable + Clone,
-        H: SideEffectHandler<A, E, T> + Copy + 'static,
-        T: Send + Sync + 'static,
-    {
-        let id = TypeId::of::<E>();
-        let wrapper = SideEffectHandlerWrapper {
-            handler,
-            phantom: PhantomData::<(A, E, T)>,
-        };
-        self.side_effect_handlers
-            .entry(id)
-            .or_default()
-            .push(Box::new(wrapper));
-
-        self
-    }
-
-    pub fn build(self) -> Eve<A> {
         let eve = Eve {
-            app: Arc::new(RwLock::new(self.app)),
-            incoming_tx: self.incoming_tx,
-            outgoing_tx: self.outgoing_tx,
-            read_handlers: Arc::new(self.read_handlers),
-            write_handlers: Arc::new(self.write_handlers),
-            side_effect_handlers: Arc::new(self.side_effect_handlers),
-
-            statuses: Arc::default(),
-            sources: Arc::default(),
-            subscribers: Arc::default(),
-            values: Arc::default(),
-            subscriptions: Arc::default(),
-            sub_handlers: Arc::default(),
+            model: Arc::clone(&state),
+            capabilities: Arc::new(caps),
+            incoming_tx,
+            outgoing_tx,
+            cancel_token: Some(cancel_token.clone()),
         };
-        run_event_loop(self.incoming_rx, self.outgoing_rx, eve.clone());
+
+        run_event_loop(eve.clone(), incoming_rx, cancel_token.clone());
+        run_effect_loop(eve.clone(), outgoing_rx, cancel_token);
         eve
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Eve<A: Send + Sync + Clone> {
-    pub app: Arc<RwLock<A>>,
-    pub(crate) incoming_tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>,
-    pub(crate) outgoing_tx: tokio::sync::mpsc::UnboundedSender<SideEffect>,
-    pub(crate) read_handlers: Arc<ReadHandlers<A>>,
-    pub(crate) write_handlers: Arc<WriteHandlers<A>>,
-    pub(crate) side_effect_handlers: Arc<SideEffectHandlers<A>>,
-
-    // Reactively
-    pub(crate) statuses: Arc<RwLock<HashMap<u64, NodeState>>>,
-    pub(crate) sources: Arc<RwLock<HashMap<u64, HashSet<u64>>>>,
-    pub(crate) subscribers: Arc<RwLock<HashMap<u64, HashSet<u64>>>>,
-    pub(crate) values: Arc<RwLock<HashMap<u64, NodeValue>>>,
-    pub(crate) subscriptions: Arc<RwLock<HashMap<u64, Arc<dyn BoxableValue>>>>,
-    pub(crate) sub_handlers: Arc<RwLock<HashMap<u64, Arc<dyn Handler<A>>>>>,
+#[derive(Debug)]
+pub struct Eve<A: Eventide> {
+    pub model: Arc<RwLock<A::Model>>,
+    pub capabilities: Arc<A::Capabilities>,
+    pub(crate) incoming_tx: tokio::sync::mpsc::UnboundedSender<EventMsg<A>>,
+    pub(crate) outgoing_tx: tokio::sync::mpsc::UnboundedSender<EffectMsg<A>>,
+    // pub(crate) ports: HashMap<TypeId,
+    pub(crate) cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
-impl<A> Eve<A>
-where
-    A: Send + Sync + Clone + 'static,
-{
-    #[must_use]
-    pub fn get_read_handlers(
-        &self,
-        id: TypeId,
-    ) -> Option<Vec<Box<dyn ReadHandlerFn<A> + Send + Sync>>> {
-        self.read_handlers.get(&id).cloned()
-    }
-
-    #[must_use]
-    pub fn get_write_handlers(
-        &self,
-        id: TypeId,
-    ) -> Option<Vec<Box<dyn WriteHandlerFn<A> + Send + Sync>>> {
-        self.write_handlers.get(&id).cloned()
-    }
-
-    #[must_use]
-    pub fn get_side_effect_handlers(
-        &self,
-        id: TypeId,
-    ) -> Option<Vec<Box<dyn SideEffectHandlerFn<A> + Send + Sync>>> {
-        self.side_effect_handlers.get(&id).cloned()
-    }
-
-    pub fn dispatch<T: Into<Event>>(
-        &self,
-        event: T,
-    ) -> Result<(), DispatchError<SystemEvent, SideEffect>> {
-        match event.into() {
-            Event::System(e) => self
-                .incoming_tx
-                .send(e)
-                .map_err(DispatchError::SendSystemEventError),
-            Event::SideEffect(e) => self
-                .outgoing_tx
-                .send(e)
-                .map_err(DispatchError::SendSideEffectError),
+impl<A: Eventide> Clone for Eve<A> {
+    fn clone(&self) -> Self {
+        Self {
+            model: Arc::clone(&self.model),
+            capabilities: Arc::clone(&self.capabilities),
+            incoming_tx: self.incoming_tx.clone(),
+            outgoing_tx: self.outgoing_tx.clone(),
+            cancel_token: self.cancel_token.clone(),
         }
     }
 }
 
-fn run_event_loop<S>(
-    mut input_rx: tokio::sync::mpsc::UnboundedReceiver<SystemEvent>,
-    mut output_rx: tokio::sync::mpsc::UnboundedReceiver<SideEffect>,
-    eve: Eve<S>,
-) where
-    S: Send + Sync + Clone + 'static,
-{
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError<A: Eventide> {
+    #[error("Error sending event: {0}")]
+    SendEventError(tokio::sync::mpsc::error::SendError<EventMsg<A>>),
+    #[error("Error sending effect: {0}")]
+    SendEffectError(tokio::sync::mpsc::error::SendError<EffectMsg<A>>),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Event loop already stopped")]
+pub struct AlreadyStopped;
+
+impl<A: Eventide> Eve<A> {
+    pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
+        if let Some(cancel_token) = self.cancel_token.as_ref() {
+            cancel_token.cancel();
+            self.cancel_token = None;
+            Ok(())
+        } else {
+            Err(AlreadyStopped)
+        }
+    }
+
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .map_or(false, |t| !t.is_cancelled())
+    }
+
+    pub fn dispatch<T: Into<Message<A>>>(&self, msg: T) -> Result<(), DispatchError<A>> {
+        match msg.into() {
+            Message::EventMsg(event) => self
+                .incoming_tx
+                .send(event)
+                .map_err(|e| DispatchError::SendEventError(e)),
+            Message::EffectMsg(effect) => self
+                .outgoing_tx
+                .send(effect)
+                .map_err(|e| DispatchError::SendEffectError(e)),
+        }
+    }
+
+    pub fn model(&self) -> parking_lot::RwLockReadGuard<A::Model> {
+        self.model.read()
+    }
+
+    pub fn model_mut(&self) -> parking_lot::RwLockWriteGuard<A::Model> {
+        self.model.write()
+    }
+
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&A::Model) -> R,
+    {
+        f(&*self.model.read())
+    }
+
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut A::Model) -> R,
+    {
+        f(&mut *self.model.write())
+    }
+
+    pub fn with_caps<F, Fut>(&self, f: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnOnce(&A::Capabilities) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let caps = Arc::clone(&self.capabilities);
+        tokio::spawn(async move {
+            f(&caps).await;
+        })
+    }
+
+    #[must_use]
+    pub fn from_model<T>(&self) -> T
+    where
+        for<'a> T: From<&'a A::Model>,
+    {
+        T::from(&*self.model.read())
+    }
+
+    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(&Self) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send + 'static,
+        R: Send + 'static,
+    {
+        tokio::spawn(f(self))
+    }
+}
+
+fn run_event_loop<A: Eventide + 'static>(
+    eve: Eve<A>,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<EventMsg<A>>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                Some(SystemEvent { id, data }) = input_rx.recv() => {
-                    if let Some(write_handlers) = eve.get_write_handlers(id) {
-                        for handler in write_handlers {
-                            match handler.write(Arc::clone(&data), eve.clone()) {
-                                None => {}
-                                Some(events) => {
-                                    for event in events.0 {
-                                        if let Err(e) = eve.dispatch(event) {
-                                            error!("Dispatch effect error: {:?}", e);
-                                        }
+                () = cancel_token.cancelled() => break,
+                msg = event_rx.recv() => {
+                    if let Some(msg) = msg {
+                        let parent_id = msg.id;
+                        let src_id = msg.src_id().unwrap_or(parent_id);
+                        // Wrap the event handling in a catch_unwind to prevent panics from terminating the loop
+                        if let Err(err) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            if let Some(msgs) = msg.event.handle(&mut eve.model.write()) {
+                                for mut msg in msgs {
+                                    msg.set_parent_id(parent_id);
+                                    msg.set_src_id(src_id);
+                                    if let Err(err) = eve.dispatch(msg) {
+                                        tracing::error!("Error dispatching message: {err}");
+                                        return;
                                     }
                                 }
                             }
-                        }
-                    } else {
-                        error!("No write handler for event id: {:?}", id);
-                    }
-                    if let Some(read_handlers) = eve.get_read_handlers(id) {
-                        for handler in read_handlers {
-                            let eve = eve.clone();
-                            let data = Arc::clone(&data);
-                            tokio::spawn(async move {
-                                match handler.read(data, eve.clone()) {
-                                    None => {}
-                                    Some(events) => {
-                                        for effect in events.0 {
-                                            if let Err(e) = eve.dispatch(effect) {
-                                                error!("Dispatch effect error: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            });
+                        })) {
+                            tracing::error!("Panic occurred during event handling: {:?}", err);
                         }
                     }
                 }
-                Some(event) = output_rx.recv() => {
-                    if let Some(handlers) = eve.get_side_effect_handlers(event.id) {
-                        for handler in handlers {
-                            let eve = eve.clone();
-                            let event = event.clone();
-                            tokio::spawn(async move {
-                                match handler.side_effect(event.data, eve.clone()).await {
-                                    None => {}
-                                    Some(events) => {
-                                        for effect in events.0 {
-                                            if let Err(e) = eve.dispatch(effect) {
-                                                error!("Dispatch effect error: {:?}", e);
-                                            }
-                                        }
+            }
+        }
+    });
+}
+
+fn run_effect_loop<A: Eventide + 'static>(
+    eve: Eve<A>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<EffectMsg<A>>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = cancel_token.cancelled() => break,
+                msg = rx.recv() => {
+                    if let Some(msg) = msg {
+                        let parent_id = msg.id;
+                        let src_id = msg.src_id().unwrap_or(parent_id);
+                        let eve = eve.clone();
+                        let ctx = EffectContext::from((&eve, parent_id));
+                        let handle = tokio::spawn(async move {
+                            if let Some(msgs) = msg.effect.handle(ctx).await {
+                                for mut msg in msgs {
+                                    msg.set_parent_id(parent_id);
+                                    msg.set_src_id(src_id);
+                                    if let Err(err) = eve.dispatch(msg) {
+                                        tracing::error!("Error dispatching message: {err}");
+                                        return;
                                     }
                                 }
-                            });
+                            }
+                        });
+                        match handle.await {
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::error!("Error occurred during effect handling: {:?}", err);
+                            }
                         }
                     }
-
                 }
             }
         }
@@ -283,28 +223,39 @@ fn run_event_loop<S>(
 
 #[cfg(test)]
 mod test {
-    use std::hash::{Hash, Hasher};
-
-    use crate::event::FromEve;
 
     use super::*;
 
-    #[derive(Clone)]
-    pub struct App;
-    #[test]
-    fn fx_hasher_test() {
-        #[derive(Hash, PartialEq, Eq)]
-        struct MyStruct {
-            x: i32,
-        }
+    // struct Model;
+    // struct Capabilities;
+    // #[derive(Debug)]
+    // struct Event;
+    // struct Effect;
+    //
+    // struct App;
+    //
+    // impl Eventide for App {
+    //     type Model = Model;
+    //     type Capabilities = Capabilities;
+    //     type Event = Event;
+    //     type Effect = Effect;
+    // }
 
-        let mut hasher = FxHasher::default();
-        let my_struct = MyStruct { x: 42 };
-        my_struct.hash(&mut hasher);
-        let first_hash = hasher.finish();
-        hasher = FxHasher::default();
-        my_struct.hash(&mut hasher);
-        let second_hash = hasher.finish();
-        assert_eq!(first_hash, second_hash);
-    }
+    // impl EventHandler<App> for Event {
+    //     fn handle(self, _model: &mut Model) -> Option<Vec<Message<App>>> {
+    //         None
+    //     }
+    // }
+
+    // impl EffectHandler<App> for Effect {
+    //     async fn handle(self, _caps: &Capabilities) -> Option<Vec<Message<App>>> {
+    //         None
+    //     }
+    // }
+    // #[tokio::test]
+    // async fn eve_spawn_test() {
+    //     let eve = App::run(Model, Capabilities);
+    //     let handle = eve.spawn(|eve| async { dbg!(42) });
+    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // }
 }
