@@ -1,43 +1,44 @@
-use std::{panic::AssertUnwindSafe, sync::Arc};
+use std::{fmt, sync::Arc};
 
+use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use crate::event::{EffectContext, EffectHandler, EffectMsg, EventHandler, EventMsg, Message};
-
-pub trait Eventide: Sized + 'static {
+#[async_trait]
+pub trait Eventide: Sized + Copy + Send + Sync + 'static {
     type Model: Send + Sync + 'static;
     type Capabilities: Send + Sync + 'static;
-    type Event: EventHandler<Self> + Send + 'static;
-    type Effect: EffectHandler<Self> + Send + 'static;
 
-    fn run(model: Self::Model, caps: Self::Capabilities) -> Eve<Self> {
-        let (incoming_tx, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (outgoing_tx, outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        let state = Arc::new(RwLock::new(model));
+    type Effect: Send + fmt::Debug + 'static;
+
+    fn eve(model: Self::Model, caps: Self::Capabilities) -> Eve<Self> {
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancelation_token = tokio_util::sync::CancellationToken::new();
+        let model = Arc::new(RwLock::new(model));
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
         let eve = Eve {
-            model: Arc::clone(&state),
+            model: Arc::clone(&model),
             capabilities: Arc::new(caps),
-            incoming_tx,
-            outgoing_tx,
-            cancel_token: Some(cancel_token.clone()),
+            effect_tx,
+            cancelation_token: Some(cancelation_token.clone()),
+            pool: Arc::new(pool),
         };
 
-        run_event_loop(eve.clone(), incoming_rx, cancel_token.clone());
-        run_effect_loop(eve.clone(), outgoing_rx, cancel_token);
+        run_effect_loop(eve.clone(), effect_rx, cancelation_token);
+
         eve
     }
+
+    async fn handle_effect(event: Self::Effect, ctx: EffectContext<Self>);
 }
 
 #[derive(Debug)]
 pub struct Eve<A: Eventide> {
-    pub model: Arc<RwLock<A::Model>>,
-    pub capabilities: Arc<A::Capabilities>,
-    pub(crate) incoming_tx: tokio::sync::mpsc::UnboundedSender<EventMsg<A>>,
-    pub(crate) outgoing_tx: tokio::sync::mpsc::UnboundedSender<EffectMsg<A>>,
-    // pub(crate) ports: HashMap<TypeId,
-    pub(crate) cancel_token: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) model: Arc<RwLock<A::Model>>,
+    pub(crate) capabilities: Arc<A::Capabilities>,
+    pub(crate) effect_tx: tokio::sync::mpsc::UnboundedSender<A::Effect>,
+    pub(crate) cancelation_token: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) pool: Arc<rayon::ThreadPool>,
 }
 
 impl<A: Eventide> Clone for Eve<A> {
@@ -45,19 +46,11 @@ impl<A: Eventide> Clone for Eve<A> {
         Self {
             model: Arc::clone(&self.model),
             capabilities: Arc::clone(&self.capabilities),
-            incoming_tx: self.incoming_tx.clone(),
-            outgoing_tx: self.outgoing_tx.clone(),
-            cancel_token: self.cancel_token.clone(),
+            effect_tx: self.effect_tx.clone(),
+            cancelation_token: self.cancelation_token.clone(),
+            pool: Arc::clone(&self.pool),
         }
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DispatchError<A: Eventide> {
-    #[error("Error sending event: {0}")]
-    SendEventError(tokio::sync::mpsc::error::SendError<EventMsg<A>>),
-    #[error("Error sending effect: {0}")]
-    SendEffectError(tokio::sync::mpsc::error::SendError<EffectMsg<A>>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,9 +59,8 @@ pub struct AlreadyStopped;
 
 impl<A: Eventide> Eve<A> {
     pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
-        if let Some(cancel_token) = self.cancel_token.as_ref() {
-            cancel_token.cancel();
-            self.cancel_token = None;
+        if let Some(cancelation_token) = self.cancelation_token.take() {
+            cancelation_token.cancel();
             Ok(())
         } else {
             Err(AlreadyStopped)
@@ -77,22 +69,21 @@ impl<A: Eventide> Eve<A> {
 
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.cancel_token
-            .as_ref()
-            .map_or(false, |t| !t.is_cancelled())
+        self.cancelation_token.is_some()
     }
 
-    pub fn dispatch<T: Into<Message<A>>>(&self, msg: T) -> Result<(), DispatchError<A>> {
-        match msg.into() {
-            Message::EventMsg(event) => self
-                .incoming_tx
-                .send(event)
-                .map_err(|e| DispatchError::SendEventError(e)),
-            Message::EffectMsg(effect) => self
-                .outgoing_tx
-                .send(effect)
-                .map_err(|e| DispatchError::SendEffectError(e)),
-        }
+    pub fn dispatch<T>(&self, effect: T)
+    where
+        T: Into<A::Effect>,
+    {
+        self.effect_tx.send(effect.into()).unwrap();
+    }
+
+    pub async fn dispatch_sync<T>(&self, effect: T)
+    where
+        T: Into<A::Effect> + Send,
+    {
+        A::handle_effect(effect.into(), EffectContext::from(self)).await;
     }
 
     pub fn model(&self) -> parking_lot::RwLockReadGuard<A::Model> {
@@ -117,145 +108,342 @@ impl<A: Eventide> Eve<A> {
         f(&mut *self.model.write())
     }
 
-    pub fn with_caps<F, Fut>(&self, f: F) -> tokio::task::JoinHandle<()>
-    where
-        F: FnOnce(&A::Capabilities) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
-    {
-        let caps = Arc::clone(&self.capabilities);
-        tokio::spawn(async move {
-            f(&caps).await;
-        })
+    #[must_use]
+    pub fn capabilities(&self) -> &A::Capabilities {
+        self.capabilities.as_ref()
     }
 
-    #[must_use]
-    pub fn from_model<T>(&self) -> T
+    pub fn spawn_rayon<F>(&self, f: F)
     where
-        for<'a> T: From<&'a A::Model>,
+        F: FnOnce(TaskContext<A>) + Send + 'static,
     {
-        T::from(&*self.model.read())
+        let ctx = TaskContext::from(self);
+        self.pool.spawn(move || f(ctx));
     }
 
     pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
-        F: FnOnce(&Self) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = R> + Send + 'static,
+        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
         R: Send + 'static,
     {
-        tokio::spawn(f(self))
+        let ctx = AsyncTaskContext::from(self);
+        tokio::spawn(async move { f(ctx).await })
+    }
+
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        let ctx = TaskContext::from(self);
+        tokio::task::spawn_blocking(|| f(ctx))
+    }
+
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
+        T: Send,
+    {
+        let ctx = TaskContext::from(self);
+        self.pool.scope(|s| f(s, ctx));
     }
 }
 
-fn run_event_loop<A: Eventide + 'static>(
+pub struct EffectContext<A: Eventide> {
     eve: Eve<A>,
-    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<EventMsg<A>>,
-    cancel_token: tokio_util::sync::CancellationToken,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = cancel_token.cancelled() => break,
-                msg = event_rx.recv() => {
-                    if let Some(msg) = msg {
-                        let parent_id = msg.id;
-                        let src_id = msg.src_id().unwrap_or(parent_id);
-                        // Wrap the event handling in a catch_unwind to prevent panics from terminating the loop
-                        if let Err(err) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            if let Some(msgs) = msg.event.handle(&mut eve.model.write()) {
-                                for mut msg in msgs {
-                                    msg.set_parent_id(parent_id);
-                                    msg.set_src_id(src_id);
-                                    if let Err(err) = eve.dispatch(msg) {
-                                        tracing::error!("Error dispatching message: {err}");
-                                        return;
-                                    }
-                                }
-                            }
-                        })) {
-                            tracing::error!("Panic occurred during event handling: {:?}", err);
-                        }
-                    }
-                }
-            }
+}
+
+impl<A: Eventide> EffectContext<A> {
+    pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
+        self.eve.stop()
+    }
+
+    pub fn dispatch<T>(&self, effect: T)
+    where
+        T: Into<A::Effect>,
+    {
+        self.eve.dispatch(effect);
+    }
+
+    pub async fn dispatch_sync<T>(&self, effect: T)
+    where
+        T: Into<A::Effect> + Send,
+    {
+        self.eve.dispatch_sync(effect).await;
+    }
+
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&A::Model) -> R,
+    {
+        self.eve.with_model(f)
+    }
+
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut A::Model) -> R,
+    {
+        self.eve.with_model_mut(f)
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> &A::Capabilities {
+        self.eve.capabilities()
+    }
+
+    pub async fn with_capabilities<F, Fut, R>(&self, f: F) -> R
+    where
+        F: FnOnce(Arc<A::Capabilities>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
+        R: Send + 'static,
+    {
+        let caps = Arc::clone(&self.eve.capabilities);
+        f(caps).await
+    }
+
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        self.eve.spawn_rayon(f);
+    }
+
+    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
+        R: Send + 'static,
+    {
+        self.eve.spawn(f)
+    }
+
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        self.eve.spawn_blocking(f)
+    }
+
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
+        T: Send,
+    {
+        self.eve.scope::<F, T>(f);
+    }
+}
+
+impl<A: Eventide> Clone for EffectContext<A> {
+    fn clone(&self) -> Self {
+        Self {
+            eve: self.eve.clone(),
         }
-    });
+    }
+}
+
+impl<A: Eventide> From<&Eve<A>> for EffectContext<A> {
+    fn from(value: &Eve<A>) -> Self {
+        Self { eve: value.clone() }
+    }
+}
+
+pub struct TaskContext<A: Eventide> {
+    eve: Eve<A>,
+}
+
+impl<A: Eventide> TaskContext<A> {
+    pub fn dispatch<T>(&self, effect: T)
+    where
+        T: Into<A::Effect>,
+    {
+        self.eve.dispatch(effect);
+    }
+
+    pub async fn dispatch_sync<T>(&self, effect: T)
+    where
+        T: Into<A::Effect> + Send,
+    {
+        self.eve.dispatch_sync(effect).await;
+    }
+
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&A::Model) -> R,
+    {
+        self.eve.with_model(f)
+    }
+
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut A::Model) -> R,
+    {
+        self.eve.with_model_mut(f)
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> &A::Capabilities {
+        self.eve.capabilities()
+    }
+
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        self.eve.spawn_rayon(f);
+    }
+}
+
+impl<A: Eventide> Clone for TaskContext<A> {
+    fn clone(&self) -> Self {
+        Self {
+            eve: self.eve.clone(),
+        }
+    }
+}
+
+impl<A: Eventide> From<&Eve<A>> for TaskContext<A> {
+    fn from(value: &Eve<A>) -> Self {
+        Self { eve: value.clone() }
+    }
+}
+
+impl<A: Eventide> From<&EffectContext<A>> for TaskContext<A> {
+    fn from(value: &EffectContext<A>) -> Self {
+        Self {
+            eve: value.eve.clone(),
+        }
+    }
+}
+
+pub struct AsyncTaskContext<A: Eventide> {
+    eve: Eve<A>,
+}
+
+impl<A: Eventide> AsyncTaskContext<A> {
+    pub fn dispatch<T>(&self, effect: T)
+    where
+        T: Into<A::Effect>,
+    {
+        self.eve.dispatch(effect);
+    }
+
+    pub async fn dispatch_sync<T>(&self, effect: T)
+    where
+        T: Into<A::Effect> + Send,
+    {
+        self.eve.dispatch_sync(effect).await;
+    }
+
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&A::Model) -> R,
+    {
+        self.eve.with_model(f)
+    }
+
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut A::Model) -> R,
+    {
+        self.eve.with_model_mut(f)
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> &A::Capabilities {
+        self.eve.capabilities()
+    }
+
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        self.eve.spawn_rayon(f);
+    }
+
+    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
+        R: Send + 'static,
+    {
+        self.eve.spawn(f)
+    }
+
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        self.eve.spawn_blocking(f)
+    }
+}
+
+impl<A: Eventide> Clone for AsyncTaskContext<A> {
+    fn clone(&self) -> Self {
+        Self {
+            eve: self.eve.clone(),
+        }
+    }
+}
+
+impl<A: Eventide> From<&Eve<A>> for AsyncTaskContext<A> {
+    fn from(value: &Eve<A>) -> Self {
+        Self { eve: value.clone() }
+    }
+}
+
+impl<A: Eventide> From<&EffectContext<A>> for AsyncTaskContext<A> {
+    fn from(value: &EffectContext<A>) -> Self {
+        Self {
+            eve: value.eve.clone(),
+        }
+    }
+}
+
+impl<A: Eventide> From<&AsyncTaskContext<A>> for TaskContext<A> {
+    fn from(value: &AsyncTaskContext<A>) -> Self {
+        Self {
+            eve: value.eve.clone(),
+        }
+    }
 }
 
 fn run_effect_loop<A: Eventide + 'static>(
     eve: Eve<A>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<EffectMsg<A>>,
-    cancel_token: tokio_util::sync::CancellationToken,
-) {
+    mut effect_rx: tokio::sync::mpsc::UnboundedReceiver<A::Effect>,
+    cancelation_token: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                () = cancel_token.cancelled() => break,
-                msg = rx.recv() => {
-                    if let Some(msg) = msg {
-                        let parent_id = msg.id;
-                        let src_id = msg.src_id().unwrap_or(parent_id);
-                        let eve = eve.clone();
-                        let ctx = EffectContext::from((&eve, parent_id));
-                        let handle = tokio::spawn(async move {
-                            if let Some(msgs) = msg.effect.handle(ctx).await {
-                                for mut msg in msgs {
-                                    msg.set_parent_id(parent_id);
-                                    msg.set_src_id(src_id);
-                                    if let Err(err) = eve.dispatch(msg) {
-                                        tracing::error!("Error dispatching message: {err}");
-                                        return;
-                                    }
-                                }
-                            }
-                        });
-                        match handle.await {
-                            Ok(_) => {}
-                            Err(err) => {
-                                tracing::error!("Error occurred during effect handling: {:?}", err);
-                            }
-                        }
-                    }
+                () = cancelation_token.cancelled() => break,
+                Some(request) = effect_rx.recv() => {
+                    let eve = eve.clone();
+                    A::handle_effect(request, EffectContext::from(&eve)).await;
                 }
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
 mod test {
 
-    use super::*;
-
-    // struct Model;
-    // struct Capabilities;
-    // #[derive(Debug)]
-    // struct Event;
-    // struct Effect;
-    //
-    // struct App;
-    //
-    // impl Eventide for App {
-    //     type Model = Model;
-    //     type Capabilities = Capabilities;
-    //     type Event = Event;
-    //     type Effect = Effect;
-    // }
-
-    // impl EventHandler<App> for Event {
-    //     fn handle(self, _model: &mut Model) -> Option<Vec<Message<App>>> {
-    //         None
-    //     }
-    // }
-
-    // impl EffectHandler<App> for Effect {
-    //     async fn handle(self, _caps: &Capabilities) -> Option<Vec<Message<App>>> {
-    //         None
-    //     }
-    // }
-    // #[tokio::test]
-    // async fn eve_spawn_test() {
-    //     let eve = App::run(Model, Capabilities);
-    //     let handle = eve.spawn(|eve| async { dbg!(42) });
-    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    // }
+    #[tokio::test]
+    async fn spawn_test() {
+        std::thread::spawn(|| {
+            println!("hello from thread");
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                tokio::spawn(async move {
+                    println!("hello from tokio");
+                })
+                .await
+                .unwrap();
+            });
+        });
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
 }
