@@ -14,6 +14,7 @@ pub trait Eventide: Sized + Copy + Send + Sync + 'static {
         let (effect_tx, effect_rx) = tokio::sync::mpsc::unbounded_channel();
         let cancelation_token = tokio_util::sync::CancellationToken::new();
         let model = Arc::new(RwLock::new(model));
+        #[cfg(feature = "rayon")]
         let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
         let eve = Eve {
@@ -21,6 +22,7 @@ pub trait Eventide: Sized + Copy + Send + Sync + 'static {
             capabilities: Arc::new(caps),
             effect_tx,
             cancelation_token: Some(cancelation_token.clone()),
+            #[cfg(feature = "rayon")]
             pool: Arc::new(pool),
         };
 
@@ -38,6 +40,7 @@ pub struct Eve<A: Eventide> {
     pub(crate) capabilities: Arc<A::Capabilities>,
     pub(crate) effect_tx: tokio::sync::mpsc::UnboundedSender<A::Effect>,
     pub(crate) cancelation_token: Option<tokio_util::sync::CancellationToken>,
+    #[cfg(feature = "rayon")]
     pub(crate) pool: Arc<rayon::ThreadPool>,
 }
 
@@ -48,6 +51,7 @@ impl<A: Eventide> Clone for Eve<A> {
             capabilities: Arc::clone(&self.capabilities),
             effect_tx: self.effect_tx.clone(),
             cancelation_token: self.cancelation_token.clone(),
+            #[cfg(feature = "rayon")]
             pool: Arc::clone(&self.pool),
         }
     }
@@ -79,13 +83,6 @@ impl<A: Eventide> Eve<A> {
         self.effect_tx.send(effect.into()).unwrap();
     }
 
-    pub async fn dispatch_sync<T>(&self, effect: T)
-    where
-        T: Into<A::Effect> + Send,
-    {
-        A::handle_effect(effect.into(), EffectContext::from(self)).await;
-    }
-
     pub fn model(&self) -> parking_lot::RwLockReadGuard<A::Model> {
         self.model.read()
     }
@@ -113,14 +110,6 @@ impl<A: Eventide> Eve<A> {
         self.capabilities.as_ref()
     }
 
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        let ctx = TaskContext::from(self);
-        self.pool.spawn(move || f(ctx));
-    }
-
     pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
@@ -140,6 +129,16 @@ impl<A: Eventide> Eve<A> {
         tokio::task::spawn_blocking(|| f(ctx))
     }
 
+    #[cfg(feature = "rayon")]
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        let ctx = TaskContext::from(self);
+        self.pool.spawn(move || f(ctx));
+    }
+
+    #[cfg(feature = "rayon")]
     pub fn scope<F, T>(&self, f: F)
     where
         F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
@@ -155,10 +154,12 @@ pub struct EffectContext<A: Eventide> {
 }
 
 impl<A: Eventide> EffectContext<A> {
+    #[inline]
     pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
         self.eve.stop()
     }
 
+    #[inline]
     pub fn dispatch<T>(&self, effect: T)
     where
         T: Into<A::Effect>,
@@ -166,13 +167,7 @@ impl<A: Eventide> EffectContext<A> {
         self.eve.dispatch(effect);
     }
 
-    pub async fn dispatch_sync<T>(&self, effect: T)
-    where
-        T: Into<A::Effect> + Send,
-    {
-        self.eve.dispatch_sync(effect).await;
-    }
-
+    #[inline]
     pub fn with_model<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&A::Model) -> R,
@@ -180,6 +175,7 @@ impl<A: Eventide> EffectContext<A> {
         self.eve.with_model(f)
     }
 
+    #[inline]
     pub fn with_model_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut A::Model) -> R,
@@ -187,6 +183,7 @@ impl<A: Eventide> EffectContext<A> {
         self.eve.with_model_mut(f)
     }
 
+    #[inline]
     #[must_use]
     pub fn capabilities(&self) -> &A::Capabilities {
         self.eve.capabilities()
@@ -202,13 +199,7 @@ impl<A: Eventide> EffectContext<A> {
         f(caps).await
     }
 
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        self.eve.spawn_rayon(f);
-    }
-
+    #[inline]
     pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
@@ -218,6 +209,7 @@ impl<A: Eventide> EffectContext<A> {
         self.eve.spawn(f)
     }
 
+    #[inline]
     pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
@@ -226,6 +218,17 @@ impl<A: Eventide> EffectContext<A> {
         self.eve.spawn_blocking(f)
     }
 
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        self.eve.spawn_rayon(f);
+    }
+
+    #[inline]
+    #[cfg(feature = "rayon")]
     pub fn scope<F, T>(&self, f: F)
     where
         F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
@@ -243,6 +246,12 @@ impl<A: Eventide> Clone for EffectContext<A> {
     }
 }
 
+impl<A: Eventide> From<&EffectContext<A>> for EffectContext<A> {
+    fn from(value: &EffectContext<A>) -> Self {
+        value.clone()
+    }
+}
+
 impl<A: Eventide> From<&Eve<A>> for EffectContext<A> {
     fn from(value: &Eve<A>) -> Self {
         Self { eve: value.clone() }
@@ -254,6 +263,7 @@ pub struct TaskContext<A: Eventide> {
 }
 
 impl<A: Eventide> TaskContext<A> {
+    #[inline]
     pub fn dispatch<T>(&self, effect: T)
     where
         T: Into<A::Effect>,
@@ -261,13 +271,7 @@ impl<A: Eventide> TaskContext<A> {
         self.eve.dispatch(effect);
     }
 
-    pub async fn dispatch_sync<T>(&self, effect: T)
-    where
-        T: Into<A::Effect> + Send,
-    {
-        self.eve.dispatch_sync(effect).await;
-    }
-
+    #[inline]
     pub fn with_model<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&A::Model) -> R,
@@ -275,6 +279,7 @@ impl<A: Eventide> TaskContext<A> {
         self.eve.with_model(f)
     }
 
+    #[inline]
     pub fn with_model_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut A::Model) -> R,
@@ -282,16 +287,29 @@ impl<A: Eventide> TaskContext<A> {
         self.eve.with_model_mut(f)
     }
 
+    #[inline]
     #[must_use]
     pub fn capabilities(&self) -> &A::Capabilities {
         self.eve.capabilities()
     }
 
+    #[inline]
+    #[cfg(feature = "rayon")]
     pub fn spawn_rayon<F>(&self, f: F)
     where
         F: FnOnce(TaskContext<A>) + Send + 'static,
     {
         self.eve.spawn_rayon(f);
+    }
+
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
+        T: Send,
+    {
+        self.eve.scope::<F, T>(f);
     }
 }
 
@@ -317,11 +335,20 @@ impl<A: Eventide> From<&EffectContext<A>> for TaskContext<A> {
     }
 }
 
+impl<A: Eventide> From<&TaskContext<A>> for EffectContext<A> {
+    fn from(value: &TaskContext<A>) -> Self {
+        Self {
+            eve: value.eve.clone(),
+        }
+    }
+}
+
 pub struct AsyncTaskContext<A: Eventide> {
     eve: Eve<A>,
 }
 
 impl<A: Eventide> AsyncTaskContext<A> {
+    #[inline]
     pub fn dispatch<T>(&self, effect: T)
     where
         T: Into<A::Effect>,
@@ -329,13 +356,7 @@ impl<A: Eventide> AsyncTaskContext<A> {
         self.eve.dispatch(effect);
     }
 
-    pub async fn dispatch_sync<T>(&self, effect: T)
-    where
-        T: Into<A::Effect> + Send,
-    {
-        self.eve.dispatch_sync(effect).await;
-    }
-
+    #[inline]
     pub fn with_model<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&A::Model) -> R,
@@ -343,6 +364,7 @@ impl<A: Eventide> AsyncTaskContext<A> {
         self.eve.with_model(f)
     }
 
+    #[inline]
     pub fn with_model_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut A::Model) -> R,
@@ -350,18 +372,13 @@ impl<A: Eventide> AsyncTaskContext<A> {
         self.eve.with_model_mut(f)
     }
 
+    #[inline]
     #[must_use]
     pub fn capabilities(&self) -> &A::Capabilities {
         self.eve.capabilities()
     }
 
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        self.eve.spawn_rayon(f);
-    }
-
+    #[inline]
     pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
@@ -371,12 +388,32 @@ impl<A: Eventide> AsyncTaskContext<A> {
         self.eve.spawn(f)
     }
 
+    #[inline]
     pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         self.eve.spawn_blocking(f)
+    }
+
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<A>) + Send + 'static,
+    {
+        self.eve.spawn_rayon(f);
+    }
+
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
+        T: Send,
+    {
+        self.eve.scope::<F, T>(f);
     }
 }
 
@@ -410,6 +447,14 @@ impl<A: Eventide> From<&AsyncTaskContext<A>> for TaskContext<A> {
     }
 }
 
+impl<A: Eventide> From<&AsyncTaskContext<A>> for EffectContext<A> {
+    fn from(value: &AsyncTaskContext<A>) -> Self {
+        Self {
+            eve: value.eve.clone(),
+        }
+    }
+}
+
 fn run_effect_loop<A: Eventide + 'static>(
     eve: Eve<A>,
     mut effect_rx: tokio::sync::mpsc::UnboundedReceiver<A::Effect>,
@@ -420,7 +465,6 @@ fn run_effect_loop<A: Eventide + 'static>(
             tokio::select! {
                 () = cancelation_token.cancelled() => break,
                 Some(request) = effect_rx.recv() => {
-                    let eve = eve.clone();
                     A::handle_effect(request, EffectContext::from(&eve)).await;
                 }
             }
