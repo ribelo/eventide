@@ -1,493 +1,746 @@
-use std::{fmt, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    sync::{Arc, Weak},
+};
 
-use async_trait::async_trait;
+use atomic_take::AtomicTake;
+use core::panic;
 use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 
-#[async_trait]
-pub trait Eventide: Sized + Copy + Send + Sync + 'static {
-    type Model: Send + Sync + 'static;
-    type Capabilities: Send + Sync + 'static;
+pub type Effect<M> = Box<dyn FnOnce(&EffectContext<M>) + Send>;
 
-    type Effect: Send + fmt::Debug + 'static;
+pub trait Model: Send + Sync + 'static {}
+impl<T> Model for T where T: Send + Sync + 'static {}
 
-    fn eve(model: Self::Model, caps: Self::Capabilities) -> Eve<Self> {
-        let (effect_tx, effect_rx) = tokio::sync::mpsc::unbounded_channel();
-        let cancelation_token = tokio_util::sync::CancellationToken::new();
-        let model = Arc::new(RwLock::new(model));
-        #[cfg(feature = "rayon")]
-        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+#[derive(Debug)]
+pub struct AppContextBuilder<M: Model> {
+    pub(crate) model: M,
+    pub(crate) capabilities: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    pub(crate) resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    #[cfg(feature = "rayon")]
+    pub(crate) pool: Option<rayon::ThreadPool>,
+    #[cfg(feature = "tokio")]
+    pub(crate) rt: Option<tokio::runtime::Runtime>,
+}
 
-        let eve = Eve {
-            model: Arc::clone(&model),
-            capabilities: Arc::new(caps),
-            effect_tx,
-            cancelation_token: Some(cancelation_token.clone()),
+impl<M: Model> AppContextBuilder<M> {
+    #[must_use]
+    fn new(model: M) -> Self {
+        AppContextBuilder {
+            model,
+            capabilities: FxHashMap::default(),
+            resources: FxHashMap::default(),
             #[cfg(feature = "rayon")]
-            pool: Arc::new(pool),
-        };
-
-        run_effect_loop(eve.clone(), effect_rx, cancelation_token);
-
-        eve
+            pool: None,
+            #[cfg(feature = "tokio")]
+            rt: None,
+        }
     }
 
-    async fn handle_effect(event: Self::Effect, ctx: EffectContext<Self>);
+    #[must_use]
+    pub fn capability<T>(mut self, capability: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.capabilities.insert(ty, Box::new(capability));
+
+        self
+    }
+
+    #[must_use]
+    pub fn resource<T>(mut self, resource: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources.insert(ty, Box::new(resource));
+
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "tokio")]
+    pub fn runtime(mut self, rt: tokio::runtime::Runtime) -> Self {
+        self.rt = Some(rt);
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "rayon")]
+    pub fn pool(mut self, pool: rayon::ThreadPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    pub fn build(self) -> AppContext<M> {
+        let (effect_tx, effect_rx) = flume::unbounded();
+        let (cancelation_tx, cancelation_rx) = flume::bounded(0);
+
+        #[cfg(feature = "rayon")]
+        let pool = self
+            .pool
+            .unwrap_or_else(|| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        #[cfg(feature = "tokio")]
+        let runtime = self.rt.unwrap_or_else(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        });
+
+        let cx = AppContext {
+            model: Arc::new(RwLock::new(self.model)),
+            capabilities: Arc::new(RwLock::new(self.capabilities)),
+            resources: Arc::new(RwLock::new(self.resources)),
+            effect_tx,
+            cancelation_tx: Arc::new(AtomicTake::new(cancelation_tx)),
+
+            #[cfg(feature = "rayon")]
+            pool: Arc::new(pool),
+
+            #[cfg(feature = "tokio")]
+            rt: Arc::new(runtime),
+        };
+
+        let effect_cx = EffectContext::from(cx.clone());
+        run_effect_loop(effect_cx, effect_rx, cancelation_rx);
+
+        cx
+    }
 }
 
 #[derive(Debug)]
-pub struct Eve<A: Eventide> {
-    pub(crate) model: Arc<RwLock<A::Model>>,
-    pub(crate) capabilities: Arc<A::Capabilities>,
-    pub(crate) effect_tx: tokio::sync::mpsc::UnboundedSender<A::Effect>,
-    pub(crate) cancelation_token: Option<tokio_util::sync::CancellationToken>,
+pub struct AppContext<M> {
+    pub(crate) model: Arc<RwLock<M>>,
+    pub(crate) capabilities: Arc<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) resources: Arc<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) effect_tx: flume::Sender<Effect<M>>,
+    pub(crate) cancelation_tx: Arc<AtomicTake<flume::Sender<()>>>,
     #[cfg(feature = "rayon")]
     pub(crate) pool: Arc<rayon::ThreadPool>,
+    #[cfg(feature = "tokio")]
+    pub(crate) rt: Arc<tokio::runtime::Runtime>,
 }
 
-impl<A: Eventide> Clone for Eve<A> {
+impl<M> Clone for AppContext<M> {
     fn clone(&self) -> Self {
         Self {
             model: Arc::clone(&self.model),
             capabilities: Arc::clone(&self.capabilities),
+            resources: Arc::clone(&self.resources),
             effect_tx: self.effect_tx.clone(),
-            cancelation_token: self.cancelation_token.clone(),
+            cancelation_tx: Arc::clone(&self.cancelation_tx),
             #[cfg(feature = "rayon")]
             pool: Arc::clone(&self.pool),
+            #[cfg(feature = "tokio")]
+            rt: Arc::clone(&self.rt),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Event loop already stopped")]
-pub struct AlreadyStopped;
+impl<A> TryFrom<EffectContext<A>> for AppContext<A> {
+    type Error = EventideError;
+    fn try_from(value: EffectContext<A>) -> Result<Self, Self::Error> {
+        let model = value.model.upgrade().ok_or(EventideError::ContextDropped)?;
+        let capabilities = value
+            .capabilities
+            .upgrade()
+            .ok_or(EventideError::ContextDropped)?;
+        let resources = value
+            .resources
+            .upgrade()
+            .ok_or(EventideError::ContextDropped)?;
+        let cancelation_tx = value
+            .cancelation_tx
+            .upgrade()
+            .ok_or(EventideError::ContextDropped)?;
 
-impl<A: Eventide> Eve<A> {
-    pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
-        if let Some(cancelation_token) = self.cancelation_token.take() {
-            cancelation_token.cancel();
+        #[cfg(feature = "rayon")]
+        let pool = value.pool.upgrade().ok_or(EventideError::ContextDropped)?;
+
+        #[cfg(feature = "tokio")]
+        let rt = value.rt.upgrade().ok_or(EventideError::ContextDropped)?;
+
+        Ok(Self {
+            model,
+            capabilities,
+            resources,
+            effect_tx: value.effect_tx,
+            cancelation_tx,
+            #[cfg(feature = "rayon")]
+            pool,
+            #[cfg(feature = "tokio")]
+            rt,
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EventideError {
+    #[error("Event loop already stopped")]
+    AlreadyStopped,
+    #[error("Context dropped")]
+    ContextDropped,
+}
+
+impl<M: Model> AppContext<M> {
+    pub fn builder(model: M) -> AppContextBuilder<M> {
+        AppContextBuilder::new(model)
+    }
+
+    pub fn stop(&mut self) -> Result<(), EventideError> {
+        if let Some(cancelation_token) = self.cancelation_tx.take() {
+            cancelation_token.send(()).unwrap();
             Ok(())
         } else {
-            Err(AlreadyStopped)
+            Err(EventideError::AlreadyStopped)
         }
     }
 
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.cancelation_token.is_some()
+        !self.cancelation_tx.is_taken()
     }
 
-    pub fn dispatch<T>(&self, effect: T)
+    pub fn dispatch<F>(&self, effect: F)
     where
-        T: Into<A::Effect>,
+        F: FnOnce(&EffectContext<M>) + Send + 'static,
     {
-        self.effect_tx.send(effect.into()).unwrap();
+        self.effect_tx.send(Box::new(effect)).unwrap();
     }
 
-    pub fn model(&self) -> parking_lot::RwLockReadGuard<A::Model> {
+    pub fn provide_capability<T>(&self, capability: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.capabilities.write().insert(ty, Box::new(capability));
+    }
+
+    #[must_use]
+    pub fn expect_capability<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.capabilities
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .unwrap()
+    }
+
+    pub fn provide_resource<T>(&self, resource: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources.write().insert(ty, Box::new(resource));
+    }
+
+    #[must_use]
+    pub fn expect_resource<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .unwrap()
+    }
+
+    pub fn model(&self) -> parking_lot::RwLockReadGuard<M> {
         self.model.read()
     }
 
-    pub fn model_mut(&self) -> parking_lot::RwLockWriteGuard<A::Model> {
+    pub fn model_mut(&self) -> parking_lot::RwLockWriteGuard<M> {
         self.model.write()
     }
 
     pub fn with_model<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&A::Model) -> R,
+        F: FnOnce(&M) -> R,
     {
         f(&*self.model.read())
     }
 
     pub fn with_model_mut<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&mut A::Model) -> R,
+        F: FnOnce(&mut M) -> R,
     {
         f(&mut *self.model.write())
     }
 
-    #[must_use]
-    pub fn capabilities(&self) -> &A::Capabilities {
-        self.capabilities.as_ref()
-    }
-
+    #[cfg(feature = "tokio")]
     pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
-        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
+        F: FnOnce(TaskContext<M>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = R> + Send,
         R: Send + 'static,
     {
-        let ctx = AsyncTaskContext::from(self);
-        tokio::spawn(async move { f(ctx).await })
+        let cx = TaskContext::from(self.clone());
+        self.rt.spawn(async move { f(cx).await })
     }
 
+    #[cfg(feature = "tokio")]
     pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
-        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
+        F: FnOnce(AppContext<M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
-        let ctx = TaskContext::from(self);
-        tokio::task::spawn_blocking(|| f(ctx))
+        let cx = self.clone();
+        self.rt.spawn_blocking(move || f(cx))
     }
 
     #[cfg(feature = "rayon")]
     pub fn spawn_rayon<F>(&self, f: F)
     where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
+        F: FnOnce(AppContext<M>) + Send + 'static,
     {
-        let ctx = TaskContext::from(self);
-        self.pool.spawn(move || f(ctx));
+        let cx = self.clone();
+        self.pool.spawn(move || f(cx));
     }
 
     #[cfg(feature = "rayon")]
     pub fn scope<F, T>(&self, f: F)
     where
-        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
+        F: FnOnce(&rayon::Scope<'_>, AppContext<M>) + Send,
         T: Send,
     {
-        let ctx = TaskContext::from(self);
-        self.pool.scope(|s| f(s, ctx));
+        let cx = self.clone();
+        self.pool.scope(|s| f(s, cx));
     }
 }
 
-pub struct EffectContext<A: Eventide> {
-    eve: Eve<A>,
-}
-
-impl<A: Eventide> EffectContext<A> {
-    #[inline]
-    pub fn stop(&mut self) -> Result<(), AlreadyStopped> {
-        self.eve.stop()
-    }
-
-    #[inline]
-    pub fn dispatch<T>(&self, effect: T)
-    where
-        T: Into<A::Effect>,
-    {
-        self.eve.dispatch(effect);
-    }
-
-    #[inline]
-    pub fn with_model<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&A::Model) -> R,
-    {
-        self.eve.with_model(f)
-    }
-
-    #[inline]
-    pub fn with_model_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut A::Model) -> R,
-    {
-        self.eve.with_model_mut(f)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn capabilities(&self) -> &A::Capabilities {
-        self.eve.capabilities()
-    }
-
-    pub async fn with_capabilities<F, Fut, R>(&self, f: F) -> R
-    where
-        F: FnOnce(Arc<A::Capabilities>) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = R> + Send,
-        R: Send + 'static,
-    {
-        let caps = Arc::clone(&self.eve.capabilities);
-        f(caps).await
-    }
-
-    #[inline]
-    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
-    where
-        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = R> + Send,
-        R: Send + 'static,
-    {
-        self.eve.spawn(f)
-    }
-
-    #[inline]
-    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
-    where
-        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
-        R: Send + 'static,
-    {
-        self.eve.spawn_blocking(f)
-    }
-
-    #[inline]
+pub struct EffectContext<M> {
+    pub(crate) model: Weak<RwLock<M>>,
+    pub(crate) capabilities: Weak<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) resources: Weak<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) effect_tx: flume::Sender<Effect<M>>,
+    pub(crate) cancelation_tx: Weak<AtomicTake<flume::Sender<()>>>,
     #[cfg(feature = "rayon")]
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        self.eve.spawn_rayon(f);
-    }
-
-    #[inline]
-    #[cfg(feature = "rayon")]
-    pub fn scope<F, T>(&self, f: F)
-    where
-        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
-        T: Send,
-    {
-        self.eve.scope::<F, T>(f);
-    }
+    pub(crate) pool: Weak<rayon::ThreadPool>,
+    #[cfg(feature = "tokio")]
+    pub(crate) rt: Weak<tokio::runtime::Runtime>,
 }
 
-impl<A: Eventide> Clone for EffectContext<A> {
+impl<A> Clone for EffectContext<A> {
     fn clone(&self) -> Self {
         Self {
-            eve: self.eve.clone(),
+            model: Weak::clone(&self.model),
+            capabilities: Weak::clone(&self.capabilities),
+            resources: Weak::clone(&self.resources),
+            effect_tx: self.effect_tx.clone(),
+            cancelation_tx: Weak::clone(&self.cancelation_tx),
+            #[cfg(feature = "rayon")]
+            pool: Weak::clone(&self.pool),
+            #[cfg(feature = "tokio")]
+            rt: Weak::clone(&self.rt),
         }
     }
 }
 
-impl<A: Eventide> From<&EffectContext<A>> for EffectContext<A> {
-    fn from(value: &EffectContext<A>) -> Self {
-        value.clone()
-    }
-}
-
-impl<A: Eventide> From<&Eve<A>> for EffectContext<A> {
-    fn from(value: &Eve<A>) -> Self {
-        Self { eve: value.clone() }
-    }
-}
-
-pub struct TaskContext<A: Eventide> {
-    eve: Eve<A>,
-}
-
-impl<A: Eventide> TaskContext<A> {
-    #[inline]
-    pub fn dispatch<T>(&self, effect: T)
-    where
-        T: Into<A::Effect>,
-    {
-        self.eve.dispatch(effect);
-    }
-
-    #[inline]
-    pub fn with_model<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&A::Model) -> R,
-    {
-        self.eve.with_model(f)
-    }
-
-    #[inline]
-    pub fn with_model_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut A::Model) -> R,
-    {
-        self.eve.with_model_mut(f)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn capabilities(&self) -> &A::Capabilities {
-        self.eve.capabilities()
-    }
-
-    #[inline]
-    #[cfg(feature = "rayon")]
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        self.eve.spawn_rayon(f);
-    }
-
-    #[inline]
-    #[cfg(feature = "rayon")]
-    pub fn scope<F, T>(&self, f: F)
-    where
-        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
-        T: Send,
-    {
-        self.eve.scope::<F, T>(f);
-    }
-}
-
-impl<A: Eventide> Clone for TaskContext<A> {
-    fn clone(&self) -> Self {
+impl<A> From<AppContext<A>> for EffectContext<A> {
+    fn from(app: AppContext<A>) -> Self {
         Self {
-            eve: self.eve.clone(),
+            model: Arc::downgrade(&app.model),
+            capabilities: Arc::downgrade(&app.capabilities),
+            resources: Arc::downgrade(&app.resources),
+            effect_tx: app.effect_tx,
+            cancelation_tx: Arc::downgrade(&app.cancelation_tx),
+            #[cfg(feature = "rayon")]
+            pool: Arc::downgrade(&app.pool),
+            #[cfg(feature = "tokio")]
+            rt: Arc::downgrade(&app.rt),
         }
     }
 }
 
-impl<A: Eventide> From<&Eve<A>> for TaskContext<A> {
-    fn from(value: &Eve<A>) -> Self {
-        Self { eve: value.clone() }
-    }
-}
-
-impl<A: Eventide> From<&EffectContext<A>> for TaskContext<A> {
-    fn from(value: &EffectContext<A>) -> Self {
-        Self {
-            eve: value.eve.clone(),
-        }
-    }
-}
-
-impl<A: Eventide> From<&TaskContext<A>> for EffectContext<A> {
-    fn from(value: &TaskContext<A>) -> Self {
-        Self {
-            eve: value.eve.clone(),
-        }
-    }
-}
-
-pub struct AsyncTaskContext<A: Eventide> {
-    eve: Eve<A>,
-}
-
-impl<A: Eventide> AsyncTaskContext<A> {
-    #[inline]
-    pub fn dispatch<T>(&self, effect: T)
-    where
-        T: Into<A::Effect>,
-    {
-        self.eve.dispatch(effect);
-    }
-
-    #[inline]
-    pub fn with_model<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&A::Model) -> R,
-    {
-        self.eve.with_model(f)
-    }
-
-    #[inline]
-    pub fn with_model_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut A::Model) -> R,
-    {
-        self.eve.with_model_mut(f)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn capabilities(&self) -> &A::Capabilities {
-        self.eve.capabilities()
-    }
-
-    #[inline]
-    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
-    where
-        F: FnOnce(AsyncTaskContext<A>) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = R> + Send,
-        R: Send + 'static,
-    {
-        self.eve.spawn(f)
-    }
-
-    #[inline]
-    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
-    where
-        F: FnOnce(TaskContext<A>) -> R + Send + Sync + 'static,
-        R: Send + 'static,
-    {
-        self.eve.spawn_blocking(f)
-    }
-
-    #[inline]
-    #[cfg(feature = "rayon")]
-    pub fn spawn_rayon<F>(&self, f: F)
-    where
-        F: FnOnce(TaskContext<A>) + Send + 'static,
-    {
-        self.eve.spawn_rayon(f);
-    }
-
-    #[inline]
-    #[cfg(feature = "rayon")]
-    pub fn scope<F, T>(&self, f: F)
-    where
-        F: FnOnce(&rayon::Scope<'_>, TaskContext<A>) + Send,
-        T: Send,
-    {
-        self.eve.scope::<F, T>(f);
-    }
-}
-
-impl<A: Eventide> Clone for AsyncTaskContext<A> {
-    fn clone(&self) -> Self {
-        Self {
-            eve: self.eve.clone(),
-        }
-    }
-}
-
-impl<A: Eventide> From<&Eve<A>> for AsyncTaskContext<A> {
-    fn from(value: &Eve<A>) -> Self {
-        Self { eve: value.clone() }
-    }
-}
-
-impl<A: Eventide> From<&EffectContext<A>> for AsyncTaskContext<A> {
-    fn from(value: &EffectContext<A>) -> Self {
-        Self {
-            eve: value.eve.clone(),
-        }
-    }
-}
-
-impl<A: Eventide> From<&AsyncTaskContext<A>> for TaskContext<A> {
-    fn from(value: &AsyncTaskContext<A>) -> Self {
-        Self {
-            eve: value.eve.clone(),
-        }
-    }
-}
-
-impl<A: Eventide> From<&AsyncTaskContext<A>> for EffectContext<A> {
-    fn from(value: &AsyncTaskContext<A>) -> Self {
-        Self {
-            eve: value.eve.clone(),
-        }
-    }
-}
-
-fn run_effect_loop<A: Eventide + 'static>(
-    eve: Eve<A>,
-    mut effect_rx: tokio::sync::mpsc::UnboundedReceiver<A::Effect>,
-    cancelation_token: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = cancelation_token.cancelled() => break,
-                Some(request) = effect_rx.recv() => {
-                    A::handle_effect(request, EffectContext::from(&eve)).await;
-                }
+impl<M: Model> EffectContext<M> {
+    pub fn stop(&mut self) -> Result<(), EventideError> {
+        if let Some(cancelation_tx) = self.cancelation_tx.upgrade() {
+            if let Some(cancelation_token) = cancelation_tx.take() {
+                // Ignore the result as the receiver might be already dropped
+                let _ = cancelation_token.send(());
             }
+            Ok(())
+        } else {
+            Err(EventideError::AlreadyStopped)
         }
-    })
+    }
+
+    #[inline]
+    pub fn dispatch<F>(&self, effect: F)
+    where
+        F: FnOnce(&EffectContext<M>) + Send + 'static,
+    {
+        self.effect_tx.send(Box::new(effect)).unwrap();
+    }
+
+    pub fn provide_capability<T>(&self, capability: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        print!("capability provided {}", std::any::type_name::<T>());
+        let ty = TypeId::of::<T>();
+        self.capabilities
+            .upgrade()
+            .expect("Capabilities should not be dropped")
+            .write()
+            .insert(ty, Box::new(capability));
+    }
+
+    #[must_use]
+    pub fn expect_capability<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        println!("Look for Capability: {}", std::any::type_name::<T>());
+        dbg!(&self.capabilities.upgrade().unwrap().read().get(&ty));
+        self.capabilities
+            .upgrade()
+            .expect("Capabilities should not be dropped")
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .unwrap_or_else(|| panic!("Capability not found: {}", std::any::type_name::<T>()))
+    }
+
+    pub fn provide_resource<T>(&self, resource: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources
+            .upgrade()
+            .expect("Resources should not be dropped")
+            .write()
+            .insert(ty, Box::new(resource));
+    }
+
+    #[must_use]
+    pub fn expect_resource<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources
+            .upgrade()
+            .expect("Resources should not be dropped")
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .unwrap_or_else(|| panic!("Resource not found: {}", std::any::type_name::<T>()))
+    }
+
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&M) -> R,
+    {
+        f(&*self
+            .model
+            .upgrade()
+            .expect("Model shoudl not be dropped")
+            .read())
+    }
+
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut M) -> R,
+    {
+        f(&mut *self
+            .model
+            .upgrade()
+            .expect("Model shoudl not be dropped")
+            .write())
+    }
+    #[inline]
+    #[cfg(feature = "tokio")]
+    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<M>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
+        R: Send + 'static,
+    {
+        let Some(rt) = self.rt.upgrade() else {
+            panic!("Tokio runtime is not available.");
+        };
+        let cx = TaskContext::from(self.clone());
+        rt.spawn(async move { f(cx).await })
+    }
+
+    #[cfg(feature = "tokio")]
+    #[inline]
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<M>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        let Some(rt) = self.rt.upgrade() else {
+            panic!("Tokio runtime is not available.");
+        };
+        let cx = TaskContext::from(self.clone());
+        rt.spawn_blocking(move || f(cx))
+    }
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<M>) + Send + 'static,
+    {
+        let Some(pool) = self.pool.upgrade() else {
+            panic!("Rayon pool is not available.");
+        };
+        let cx = TaskContext::from(self.clone());
+        pool.spawn(move || f(cx));
+    }
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, AppContext<M>) + Send,
+        T: Send,
+    {
+        let Some(pool) = self.pool.upgrade() else {
+            panic!("Rayon pool is not available.");
+        };
+        let cx = AppContext::try_from(self.clone()).unwrap();
+        pool.scope(move |s| f(s, cx));
+    }
+}
+
+pub struct TaskContext<M> {
+    pub(crate) capabilities: Weak<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) resources: Weak<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(crate) effect_tx: flume::Sender<Effect<M>>,
+    #[cfg(feature = "rayon")]
+    pub(crate) pool: Weak<rayon::ThreadPool>,
+    #[cfg(feature = "tokio")]
+    pub(crate) rt: Weak<tokio::runtime::Runtime>,
+}
+
+impl<M> Clone for TaskContext<M> {
+    fn clone(&self) -> Self {
+        Self {
+            capabilities: Weak::clone(&self.capabilities),
+            resources: Weak::clone(&self.resources),
+            effect_tx: self.effect_tx.clone(),
+            #[cfg(feature = "rayon")]
+            pool: Weak::clone(&self.pool),
+            #[cfg(feature = "tokio")]
+            rt: Weak::clone(&self.rt),
+        }
+    }
+}
+
+impl<A> From<AppContext<A>> for TaskContext<A> {
+    fn from(app: AppContext<A>) -> Self {
+        Self {
+            capabilities: Arc::downgrade(&app.capabilities),
+            resources: Arc::downgrade(&app.resources),
+            effect_tx: app.effect_tx,
+            #[cfg(feature = "rayon")]
+            pool: Arc::downgrade(&app.pool),
+            #[cfg(feature = "tokio")]
+            rt: Arc::downgrade(&app.rt),
+        }
+    }
+}
+
+impl<A> From<EffectContext<A>> for TaskContext<A> {
+    fn from(app: EffectContext<A>) -> Self {
+        Self {
+            capabilities: app.capabilities,
+            resources: app.resources,
+            effect_tx: app.effect_tx,
+            #[cfg(feature = "rayon")]
+            pool: app.pool,
+            #[cfg(feature = "tokio")]
+            rt: app.rt,
+        }
+    }
+}
+
+impl<A> From<&EffectContext<A>> for TaskContext<A> {
+    fn from(app: &EffectContext<A>) -> Self {
+        Self {
+            capabilities: Weak::clone(&app.capabilities),
+            resources: Weak::clone(&app.resources),
+            effect_tx: app.effect_tx.clone(),
+            #[cfg(feature = "rayon")]
+            pool: Weak::clone(&app.pool),
+            #[cfg(feature = "tokio")]
+            rt: Weak::clone(&app.rt),
+        }
+    }
+}
+
+impl<M: Model> TaskContext<M> {
+    #[inline]
+    pub fn dispatch<F>(&self, effect: F)
+    where
+        F: FnOnce(&EffectContext<M>) + Send + 'static,
+    {
+        self.effect_tx.send(Box::new(effect)).unwrap();
+    }
+
+    pub fn provide_capability<T>(&self, capability: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.capabilities
+            .upgrade()
+            .expect("Capabilities should not be dropped")
+            .write()
+            .insert(ty, Box::new(capability));
+    }
+
+    #[must_use]
+    pub fn expect_capability<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.capabilities
+            .upgrade()
+            .expect("Capabilities should not be dropped")
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .expect("Capability not found")
+    }
+
+    pub fn provide_resource<T>(&self, resource: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources
+            .upgrade()
+            .expect("Resources should not be dropped")
+            .write()
+            .insert(ty, Box::new(resource));
+    }
+
+    #[must_use]
+    pub fn expect_resource<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        self.resources
+            .upgrade()
+            .expect("Resources should not be dropped")
+            .read()
+            .get(&ty)
+            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
+            .cloned()
+            .expect("Resource not found")
+    }
+
+    #[inline]
+    #[cfg(feature = "tokio")]
+    pub fn spawn<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<M>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = R> + Send,
+        R: Send + 'static,
+    {
+        let Some(rt) = self.rt.upgrade() else {
+            panic!("Tokio runtime is not available.");
+        };
+        let cx = self.clone();
+        rt.spawn(async move { f(cx).await })
+    }
+
+    #[cfg(feature = "tokio")]
+    #[inline]
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(TaskContext<M>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        let Some(rt) = self.rt.upgrade() else {
+            panic!("Tokio runtime is not available.");
+        };
+        let cx = self.clone();
+        rt.spawn_blocking(move || f(cx))
+    }
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn spawn_rayon<F>(&self, f: F)
+    where
+        F: FnOnce(TaskContext<M>) + Send + 'static,
+    {
+        let Some(pool) = self.pool.upgrade() else {
+            panic!("Rayon pool is not available.");
+        };
+        let cx = self.clone();
+        pool.spawn(move || f(cx));
+    }
+    #[inline]
+    #[cfg(feature = "rayon")]
+    pub fn scope<F, T>(&self, f: F)
+    where
+        F: FnOnce(&rayon::Scope<'_>, TaskContext<M>) + Send,
+        T: Send,
+    {
+        let Some(pool) = self.pool.upgrade() else {
+            panic!("Rayon pool is not available.");
+        };
+        let cx = self.clone();
+        pool.scope(move |s| f(s, cx));
+    }
+}
+
+fn run_effect_loop<M: Model>(
+    cx: EffectContext<M>,
+    effect_rx: flume::Receiver<Effect<M>>,
+    cancelation_rx: flume::Receiver<()>,
+) {
+    std::thread::spawn(move || {
+        let mut is_canceled = false;
+        while !is_canceled {
+            flume::Selector::new()
+                .recv(&cancelation_rx, |_| is_canceled = true)
+                .recv(&effect_rx, |effect| {
+                    if let Ok(effect) = effect {
+                        (effect)(&cx);
+                    }
+                })
+                .wait();
+        }
+    });
 }
 
 #[cfg(test)]
 mod test {
+    use crate::prelude::*;
 
-    #[tokio::test]
-    async fn spawn_test() {
-        std::thread::spawn(|| {
-            println!("hello from thread");
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async move {
-                tokio::spawn(async move {
-                    println!("hello from tokio");
-                })
-                .await
-                .unwrap();
-            });
-        });
-        std::thread::sleep(std::time::Duration::from_secs(3));
+    #[test]
+    fn effect_test() {
+        struct MyModel;
+        fn hello(_cx: &EffectContext<MyModel>) {
+            println!("hello from function")
+        }
+
+        let cx = AppContext::builder(MyModel).build();
+        cx.dispatch(|_cx| println!("hello from closure"));
+        let x = 1;
+        cx.dispatch(move |_cx| println!("hello from closure with x={x}"));
+        cx.dispatch(hello);
+        cx.dispatch(|cx| hello(cx));
     }
 }
