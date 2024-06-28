@@ -1,34 +1,30 @@
 use std::{
     any::{Any, TypeId},
-    marker::PhantomData,
+    future::Future,
+    pin::Pin,
     sync::OnceLock,
 };
 
-use atomic_take::AtomicTake;
-use parking_lot::RwLock;
+use generational_box::{GenerationalBox, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
 
+#[cfg(not(feature = "async"))]
 pub type Effect<M> = Box<dyn FnOnce(AppContext<M>) + Send + Sync>;
+
+#[cfg(feature = "async")]
+pub type Effect<M> = Box<
+    dyn FnOnce(AppContext<M>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        + Send
+        + 'static,
+>;
+
 pub trait Model: Send + Sync + 'static {}
 impl<T> Model for T where T: Send + Sync + 'static {}
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static STORAGE: OnceLock<Owner<SyncStorage>> = OnceLock::new();
 
-#[derive(Debug)]
-pub struct Runtime {
-    model: RwLock<Box<dyn Any + Send + Sync>>,
-    capabilities: RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>,
-    resources: RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>,
-    effect_tx: crossbeam_channel::Sender<Box<dyn Any + Send + Sync>>,
-    cancelation_tx: AtomicTake<crossbeam_channel::Sender<()>>,
-    #[cfg(feature = "rayon")]
-    pool: rayon::ThreadPool,
-    #[cfg(feature = "tokio")]
-    rt: tokio::runtime::Runtime,
-}
-
-#[derive(Debug)]
 pub struct AppContextBuilder<M: Model> {
+    pub(crate) storage: Owner<SyncStorage>,
     pub(crate) model: M,
     pub(crate) capabilities: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
     pub(crate) resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -38,10 +34,19 @@ pub struct AppContextBuilder<M: Model> {
     pub(crate) rt: Option<tokio::runtime::Runtime>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Capability of type '{0}' already exists")]
+pub struct CapabilityExistsError(&'static str);
+
+#[derive(Debug, thiserror::Error)]
+#[error("Resource of type '{0}' already exists")]
+pub struct ResourceExistsError(&'static str);
+
 impl<M: Model> AppContextBuilder<M> {
     #[must_use]
     fn new(model: M) -> Self {
         AppContextBuilder {
+            storage: Owner::default(),
             model,
             capabilities: FxHashMap::default(),
             resources: FxHashMap::default(),
@@ -66,7 +71,7 @@ impl<M: Model> AppContextBuilder<M> {
     #[must_use]
     pub fn resource<T>(mut self, resource: T) -> Self
     where
-        T: Clone + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         let ty = TypeId::of::<T>();
         self.resources.insert(ty, Box::new(resource));
@@ -78,6 +83,7 @@ impl<M: Model> AppContextBuilder<M> {
     #[cfg(feature = "tokio")]
     pub fn runtime(mut self, rt: tokio::runtime::Runtime) -> Self {
         self.rt = Some(rt);
+
         self
     }
 
@@ -85,12 +91,15 @@ impl<M: Model> AppContextBuilder<M> {
     #[cfg(feature = "rayon")]
     pub fn pool(mut self, pool: rayon::ThreadPool) -> Self {
         self.pool = Some(pool);
+
         self
     }
 
     pub fn build(self) -> AppContext<M> {
+        #[cfg(not(feature = "async"))]
         let (effect_tx, effect_rx) = crossbeam_channel::unbounded();
-        let (cancelation_tx, cancelation_rx) = crossbeam_channel::bounded(0);
+        #[cfg(feature = "async")]
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::unbounded_channel();
 
         #[cfg(feature = "rayon")]
         let pool = self
@@ -105,32 +114,68 @@ impl<M: Model> AppContextBuilder<M> {
                 .unwrap()
         });
 
-        let runtime = Runtime {
-            model: RwLock::new(Box::new(self.model)),
-            capabilities: RwLock::new(self.capabilities),
-            resources: RwLock::new(self.resources),
+        let storage = self.storage;
+
+        let model = storage.insert(self.model);
+        let capabilities = storage.insert(self.capabilities);
+        let resources = storage.insert(self.resources);
+        let effect_tx = storage.insert(effect_tx);
+        let effect_rx = storage.insert(effect_rx);
+        let is_running = storage.insert(false);
+        #[cfg(feature = "rayon")]
+        let pool = storage.insert(pool);
+        #[cfg(feature = "tokio")]
+        let rt = storage.insert(rt);
+
+        assert!(STORAGE.set(storage).is_ok(), "Cannot set storage");
+
+        AppContext {
+            model,
+            capabilities,
+            resources,
             effect_tx,
-            cancelation_tx: AtomicTake::new(cancelation_tx),
+            effect_rx,
+            is_running,
             #[cfg(feature = "rayon")]
             pool,
             #[cfg(feature = "tokio")]
             rt,
-        };
-
-        RUNTIME.set(runtime).unwrap();
-        let cx = AppContext {
-            phantom: PhantomData,
-        };
-
-        run_effect_loop(cx, effect_rx, cancelation_rx);
-
-        cx
+        }
     }
 }
 
+#[cfg(not(feature = "async"))]
 #[derive(Debug)]
 pub struct AppContext<M: Model> {
-    phantom: PhantomData<M>,
+    pub model: GenerationalBox<M, SyncStorage>,
+    pub(crate) capabilities:
+        GenerationalBox<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>, SyncStorage>,
+    pub(crate) resources:
+        GenerationalBox<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>, SyncStorage>,
+    effect_tx: GenerationalBox<crossbeam_channel::Sender<Effect<M>>, SyncStorage>,
+    effect_rx: GenerationalBox<crossbeam_channel::Receiver<Effect<M>>, SyncStorage>,
+    is_running: GenerationalBox<bool, SyncStorage>,
+    #[cfg(feature = "rayon")]
+    pool: GenerationalBox<rayon::ThreadPool, SyncStorage>,
+    #[cfg(feature = "tokio")]
+    rt: GenerationalBox<tokio::runtime::Runtime, SyncStorage>,
+}
+
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct AppContext<M: Model> {
+    pub model: GenerationalBox<M, SyncStorage>,
+    pub(crate) capabilities:
+        GenerationalBox<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>, SyncStorage>,
+    pub(crate) resources:
+        GenerationalBox<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>, SyncStorage>,
+    effect_tx: GenerationalBox<tokio::sync::mpsc::UnboundedSender<Effect<M>>, SyncStorage>,
+    effect_rx: GenerationalBox<tokio::sync::mpsc::UnboundedReceiver<Effect<M>>, SyncStorage>,
+    is_running: GenerationalBox<bool, SyncStorage>,
+    #[cfg(feature = "rayon")]
+    pool: GenerationalBox<rayon::ThreadPool, SyncStorage>,
+    #[cfg(feature = "tokio")]
+    rt: GenerationalBox<tokio::runtime::Runtime, SyncStorage>,
 }
 
 impl<M: Model> Clone for AppContext<M> {
@@ -155,10 +200,72 @@ impl<M: Model> AppContext<M> {
         AppContextBuilder::new(model)
     }
 
+    #[cfg(not(feature = "async"))]
+    pub fn next_effect(&self) -> Result<Effect<M>, crossbeam_channel::TryRecvError> {
+        self.effect_rx.read().try_recv()
+    }
+
+    #[cfg(feature = "async")]
+    pub fn next_effect(&self) -> Result<Effect<M>, tokio::sync::mpsc::error::TryRecvError> {
+        self.effect_rx.write().try_recv()
+    }
+
+    #[cfg(not(feature = "async"))]
+    pub fn handle_effects(&self) {
+        while let Ok(effect) = self.next_effect() {
+            (effect)(*self);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    pub async fn handle_effects(&self) {
+        while let Ok(effect) = self.next_effect() {
+            (effect)(*self).await;
+        }
+    }
+
+    #[cfg(not(feature = "async"))]
+    pub fn run(&self) {
+        let cx = *self;
+        let effect_rx = self.effect_rx.manually_drop().unwrap();
+        *self.is_running.write() = true;
+        std::thread::spawn(move || {
+            while cx.is_running() {
+                crossbeam_channel::select! {
+                    recv(effect_rx) -> maybe_effect => {
+                        #[cfg(not(feature = "async"))]
+                        if let Ok(effect) = maybe_effect {
+                            (effect)(cx);
+                        }
+                    }
+                    default(std::time::Duration::from_millis(100)) => continue,
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "async")]
+    pub fn run(&self) {
+        let cx = *self;
+        let mut effect_rx = self.effect_rx.manually_drop().unwrap();
+        *self.is_running.write() = true;
+        tokio::spawn(async move {
+            while cx.is_running() {
+                tokio::select! {
+                    Some(effect) = effect_rx.recv() => {
+                        #[cfg(feature = "async")]
+                        (effect)(cx).await;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+                }
+            }
+        });
+    }
+
     #[inline]
-    pub fn stop(&mut self) -> Result<(), EventideError> {
-        if let Some(cancelation_token) = RUNTIME.get().unwrap().cancelation_tx.take() {
-            cancelation_token.send(()).unwrap();
+    pub fn stop(&self) -> Result<(), EventideError> {
+        if *self.is_running.read() {
+            *self.is_running.write() = false;
             Ok(())
         } else {
             Err(EventideError::AlreadyStopped)
@@ -168,34 +275,58 @@ impl<M: Model> AppContext<M> {
     #[inline]
     #[must_use]
     pub fn is_running(&self) -> bool {
-        !RUNTIME.get().unwrap().cancelation_tx.is_taken()
+        *self.is_running.read()
     }
 
     #[inline]
+    #[cfg(not(feature = "async"))]
     pub fn dispatch<E>(&self, effect: E)
     where
         E: FnOnce(AppContext<M>) + Send + Sync + 'static,
     {
-        RUNTIME
-            .get()
-            .unwrap()
-            .effect_tx
-            .send(Box::new(Box::new(effect) as Effect<M>))
-            .unwrap();
+        self.effect_tx.read().send(Box::new(effect)).unwrap();
     }
 
     #[inline]
-    pub fn provide_capability<T>(&self, capability: T)
+    #[cfg(feature = "async")]
+    pub fn dispatch<E>(&self, effect: E)
+    where
+        E: FnOnce(AppContext<M>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + 'static,
+    {
+        self.effect_tx.read().send(Box::new(effect)).unwrap()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn with_model<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&M, ModelContext<M>) -> R,
+    {
+        f(&self.model.read(), (*self).into())
+    }
+
+    #[inline]
+    pub fn with_model_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut M, ModelContext<M>) -> R,
+    {
+        f(&mut self.model.write(), (*self).into())
+    }
+
+    #[inline]
+    pub fn provide_capability<T>(&self, capability: T) -> Result<(), CapabilityExistsError>
     where
         T: Clone + Send + Sync + 'static,
     {
+        let mut capabilities = self.capabilities.write();
         let ty = TypeId::of::<T>();
-        RUNTIME
-            .get()
-            .unwrap()
-            .capabilities
-            .write()
-            .insert(ty, Box::new(capability));
+        if capabilities.contains_key(&ty) {
+            return Err(CapabilityExistsError(std::any::type_name::<T>()));
+        }
+        capabilities.insert(ty, Box::new(capability));
+        Ok(())
     }
 
     #[inline]
@@ -204,109 +335,82 @@ impl<M: Model> AppContext<M> {
     where
         T: Clone + Send + Sync + 'static,
     {
-        let ty = TypeId::of::<T>();
-        RUNTIME
-            .get()
-            .unwrap()
-            .capabilities
-            .read()
-            .get(&ty)
-            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
-            .cloned()
-            .unwrap()
+        // SAFETY: This function is unsafe because it performs unchecked downcasting.
+        // We assume that the type T matches the actual type stored in the capabilities map.
+        // This assumption relies on the correct usage of `provide_capability` to insert
+        // capabilities of the expected types. Violating this assumption may lead to
+        // undefined behavior.
+        unsafe {
+            let ty = TypeId::of::<T>();
+            self.capabilities
+                .read()
+                .get(&ty)
+                .map(|boxed_value| boxed_value.downcast_ref_unchecked::<T>())
+                .cloned()
+                .unwrap()
+        }
     }
 
     #[inline]
-    pub fn provide_resource<T>(&self, resource: T)
+    pub fn provide_resource<T>(&self, capability: T) -> Result<(), ResourceExistsError>
     where
-        T: Clone + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
+        let mut resources = self.resources.write();
         let ty = TypeId::of::<T>();
-        RUNTIME
-            .get()
-            .unwrap()
-            .resources
-            .write()
-            .insert(ty, Box::new(resource));
+        if resources.contains_key(&ty) {
+            return Err(ResourceExistsError(std::any::type_name::<T>()));
+        }
+        let gbox = STORAGE.get().unwrap().insert(capability);
+        resources.insert(ty, Box::new(gbox));
+        Ok(())
     }
 
     #[inline]
     #[must_use]
-    pub fn expect_resource<T>(&self) -> T
+    pub fn expect_resource<T>(&self) -> GenerationalBox<T, SyncStorage>
     where
-        T: Clone + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
-        let ty = TypeId::of::<T>();
-        RUNTIME
-            .get()
-            .unwrap()
-            .resources
-            .read()
-            .get(&ty)
-            .map(|boxed_value| boxed_value.downcast_ref::<T>().unwrap())
-            .cloned()
-            .unwrap()
-    }
-
-    #[inline]
-    pub fn model(
-        &self,
-    ) -> parking_lot::lock_api::MappedRwLockReadGuard<'_, parking_lot::RawRwLock, M> {
-        let model_guard = RUNTIME.get().unwrap().model.read();
-        parking_lot::RwLockReadGuard::map(model_guard, |model| unsafe {
-            model.downcast_ref_unchecked::<M>()
-        })
-    }
-
-    #[inline]
-    pub fn model_mut(&self) -> parking_lot::MappedRwLockWriteGuard<'_, M> {
-        let model_guard = RUNTIME
-            .get()
-            .expect("Runtime not initialized")
-            .model
-            .write();
-        parking_lot::RwLockWriteGuard::map(model_guard, |model| unsafe {
-            model.downcast_mut_unchecked::<M>()
-        })
-    }
-
-    #[inline]
-    pub fn with_model<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&M) -> R,
-    {
-        f(&self.model())
-    }
-
-    #[inline]
-    pub fn with_model_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut M) -> R,
-    {
-        f(&mut self.model_mut())
+        // SAFETY: This function is unsafe because it performs unchecked downcasting.
+        // We assume that the type T matches the actual type stored in the resources map.
+        // This assumption relies on the correct usage of `provide_resource` to insert
+        // capabilities of the expected types. Violating this assumption may lead to
+        // undefined behavior.
+        unsafe {
+            let ty = TypeId::of::<T>();
+            self.resources
+                .read()
+                .get(&ty)
+                .map(|boxed_value| {
+                    boxed_value.downcast_ref_unchecked::<GenerationalBox<T, SyncStorage>>()
+                })
+                .copied()
+                .unwrap()
+        }
     }
 
     #[inline]
     #[cfg(feature = "tokio")]
-    pub fn task<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    pub fn spawn_async<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(AsyncTaskContext<M>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = R> + Send,
         R: Send + 'static,
     {
         let cx = AsyncTaskContext::from(*self);
-        RUNTIME.get().unwrap().rt.spawn(async move { f(cx).await })
+        self.rt.read().spawn(async move { f(cx).await })
     }
 
     #[inline]
     #[cfg(feature = "tokio")]
-    pub fn task_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
-        F: FnOnce(TaskContext<M>) -> R + Send + Sync + 'static,
+        F: FnOnce(AsyncTaskContext<M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
-        let cx = TaskContext::from(*self);
-        RUNTIME.get().unwrap().rt.spawn_blocking(move || f(cx))
+        let cx = AsyncTaskContext::from(*self);
+        self.rt.read().spawn_blocking(move || f(cx))
     }
 
     #[inline]
@@ -337,7 +441,7 @@ impl<M: Model> AppContext<M> {
         F: FnOnce(TaskContext<M>) + Send + 'static,
     {
         let cx = TaskContext::from(*self);
-        RUNTIME.get().unwrap().pool.spawn(move || f(cx));
+        self.pool.read().spawn(move || f(cx));
     }
 
     #[inline]
@@ -348,34 +452,37 @@ impl<M: Model> AppContext<M> {
         T: Send,
     {
         let cx = TaskContext::from(*self);
-        RUNTIME.get().unwrap().pool.scope(|s| f(s, cx));
+        self.pool.read().scope(|s| f(s, cx));
     }
 }
 
-pub struct TaskContext<M: Model>(AppContext<M>);
+pub struct ModelContext<M: Model>(AppContext<M>);
 
-impl<M: Model> Clone for TaskContext<M> {
+impl<M: Model> Clone for ModelContext<M> {
     fn clone(&self) -> Self {
-        Self(self.0)
+        *self
     }
 }
 
-impl<M: Model> TaskContext<M> {
+impl<M: Model> Copy for ModelContext<M> {}
+
+impl<M: Model> ModelContext<M> {
     #[inline]
-    pub fn invoke<E, T, R>(&self, effect: E) -> R
+    #[cfg(not(feature = "async"))]
+    pub fn dispatch<E>(&self, effect: E)
     where
-        E: FnOnce(T) -> R + Send + 'static,
-        T: From<TaskContext<M>>,
-        R: Send + 'static,
+        E: FnOnce(AppContext<M>) + Send + Sync + 'static,
     {
-        let cx = T::from(self.clone());
-        (effect)(cx)
+        self.0.dispatch(effect);
     }
 
     #[inline]
-    pub fn dispatch<F>(&self, effect: F)
+    #[cfg(feature = "async")]
+    pub fn dispatch<E>(&self, effect: E)
     where
-        F: FnOnce(AppContext<M>) + Send + Sync + 'static,
+        E: FnOnce(AppContext<M>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + 'static,
     {
         self.0.dispatch(effect);
     }
@@ -391,9 +498,59 @@ impl<M: Model> TaskContext<M> {
 
     #[inline]
     #[must_use]
-    pub fn expect_resource<T>(&self) -> T
+    pub fn expect_resource<T>(&self) -> GenerationalBox<T, SyncStorage>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.0.expect_resource::<T>()
+    }
+}
+
+pub struct TaskContext<M: Model>(AppContext<M>);
+
+impl<M: Model> Clone for TaskContext<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M: Model> Copy for TaskContext<M> {}
+
+impl<M: Model> TaskContext<M> {
+    #[inline]
+    #[cfg(not(feature = "async"))]
+    pub fn dispatch<E>(&self, effect: E)
+    where
+        E: FnOnce(AppContext<M>) + Send + Sync + 'static,
+    {
+        self.0.dispatch(effect);
+    }
+
+    #[inline]
+    #[cfg(feature = "async")]
+    pub fn dispatch<E>(&self, effect: E)
+    where
+        E: FnOnce(AppContext<M>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + 'static,
+    {
+        self.0.dispatch(effect);
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn expect_capability<T>(&self) -> T
     where
         T: Clone + Send + Sync + 'static,
+    {
+        self.0.expect_capability::<T>()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn expect_resource<T>(&self) -> GenerationalBox<T, SyncStorage>
+    where
+        T: Send + Sync + 'static,
     {
         self.0.expect_resource::<T>()
     }
@@ -443,16 +600,31 @@ pub struct AsyncTaskContext<M: Model>(AppContext<M>);
 #[cfg(feature = "tokio")]
 impl<M: Model> Clone for AsyncTaskContext<M> {
     fn clone(&self) -> Self {
-        Self(self.0)
+        *self
     }
 }
 
 #[cfg(feature = "tokio")]
+impl<M: Model> Copy for AsyncTaskContext<M> {}
+
+#[cfg(feature = "tokio")]
 impl<M: Model> AsyncTaskContext<M> {
     #[inline]
-    pub fn dispatch<F>(&self, effect: F)
+    #[cfg(not(feature = "async"))]
+    pub fn dispatch<E>(&self, effect: E)
     where
-        F: FnOnce(AppContext<M>) + Send + Sync + 'static,
+        E: FnOnce(AppContext<M>) + Send + Sync + 'static,
+    {
+        self.0.dispatch(effect);
+    }
+
+    #[inline]
+    #[cfg(feature = "async")]
+    pub fn dispatch<E>(&self, effect: E)
+    where
+        E: FnOnce(AppContext<M>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + 'static,
     {
         self.0.dispatch(effect);
     }
@@ -468,22 +640,32 @@ impl<M: Model> AsyncTaskContext<M> {
 
     #[inline]
     #[must_use]
-    pub fn expect_resource<T>(&self) -> T
+    pub fn expect_resource<T>(&self) -> GenerationalBox<T, SyncStorage>
     where
-        T: Clone + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         self.0.expect_resource::<T>()
     }
 
     #[inline]
     #[cfg(feature = "tokio")]
-    pub fn task<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    pub fn spawn_async<F, Fut, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         F: FnOnce(AsyncTaskContext<M>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = R> + Send,
         R: Send + 'static,
     {
-        self.0.task(f)
+        self.0.spawn_async(f)
+    }
+
+    #[inline]
+    #[cfg(feature = "tokio")]
+    pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce(AsyncTaskContext<M>) -> R + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        self.0.spawn_blocking(f)
     }
 
     #[inline]
@@ -524,6 +706,12 @@ impl<M: Model> AsyncTaskContext<M> {
     }
 }
 
+impl<M: Model> From<AppContext<M>> for ModelContext<M> {
+    fn from(value: AppContext<M>) -> Self {
+        Self(value)
+    }
+}
+
 impl<M: Model> From<AppContext<M>> for TaskContext<M> {
     fn from(value: AppContext<M>) -> Self {
         Self(value)
@@ -541,103 +729,5 @@ impl<M: Model> From<AppContext<M>> for AsyncTaskContext<M> {
 impl<M: Model> From<AsyncTaskContext<M>> for TaskContext<M> {
     fn from(value: AsyncTaskContext<M>) -> Self {
         Self(value.0)
-    }
-}
-
-fn run_effect_loop<M: Model>(
-    cx: AppContext<M>,
-    effect_rx: crossbeam_channel::Receiver<Box<dyn Any + Send + Sync>>,
-    cancelation_rx: crossbeam_channel::Receiver<()>,
-) {
-    std::thread::spawn(move || {
-        let mut is_canceled = false;
-        while !is_canceled {
-            crossbeam_channel::select! {
-                recv(cancelation_rx) -> _ => is_canceled = true,
-                recv(effect_rx) -> maybe_effect => {
-                    if let Ok(boxed_effect) = maybe_effect {
-                        unsafe {
-                            let effect = boxed_effect.downcast_unchecked::<Effect<M>>();
-                            (effect)(cx);
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-#[cfg(test)]
-mod test {
-    use std::{any::Any, sync::atomic::AtomicBool};
-
-    use crate::{
-        eve::{Effect, Model},
-        prelude::*,
-    };
-
-    #[test]
-    fn effect_test() {
-        struct MyModel;
-
-        // // Tworzymy Box<dyn Any> przechowujący MyEffect
-        // let effect: Box<dyn Any + Send + Sync> =
-        //     Box::new(
-        //         Box::new(|cx: AppContext<MyModel>| println!("hello from effect"))
-        //             as Effect<MyModel>,
-        //     );
-        //
-        // // Downcast do MyEffect
-        // let downcasted = effect.downcast::<Effect<MyModel>>();
-        //
-        // // Teraz downcasted.is_ok() zwróci true
-        // println!("{}", downcasted.is_ok());
-        //
-        // // Możemy teraz wywołać funkcję
-        // if let Ok(effect) = downcasted {
-        //     (effect)(cx);
-        // }
-
-        // Tworzymy Box<dyn Any> przechowujący MyEffect
-
-        // // Downcast do MyEffect
-        // let downcasted = effect.downcast::<Effect<MyModel>>();
-        //
-        // // Teraz downcasted.is_ok() zwróci true
-        // println!("{}", downcasted.is_ok());
-        //
-        // let cx = AppContext::builder(MyModel).build();
-        // // Możemy teraz wywołać funkcję
-        // if let Ok(effect) = downcasted {
-        //     (effect)(cx);
-        // }
-
-        let cx = AppContext::builder(MyModel).build();
-        let mut durations = Vec::new();
-        for _ in 0..100 {
-            let start = std::time::Instant::now();
-            let is_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            for _ in 0..1_000_000 {
-                cx.dispatch(|_| {})
-            }
-
-            cx.dispatch({
-                let is_done = is_done.clone();
-                move |_| {
-                    is_done.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-            });
-
-            // Wait for the dispatch to complete
-            while !is_done.load(std::sync::atomic::Ordering::SeqCst) {}
-
-            let duration = start.elapsed();
-            println!("Time elapsed in dispatching: {:?}", duration);
-            durations.push(duration);
-        }
-        let total_duration: u128 = durations.iter().map(|x| x.as_millis()).sum();
-        let avg = total_duration / durations.len() as u128;
-        println!("Average time: {avg} ms");
-        // std::thread::sleep(std::time::Duration::from_secs(1))
     }
 }
