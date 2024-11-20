@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "atomic-take",
  "crossbeam-channel",
+ "crossbeam-utils",
  "generational-box",
  "parking_lot",
  "rand",
