@@ -2,5 +2,5 @@
 pub mod bind;
 
 pub mod prelude {
-    pub use crate::bind::{ctx, capabilities::*, AppContext, Effect};
+    pub use crate::bind::{cx, capabilities::*, GlobalAppContext, AppContext, Effect, Model};
 }

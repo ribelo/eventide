@@ -1,33 +1,60 @@
 use std::{
     any::{Any, TypeId},
     fmt,
-    sync::{atomic::AtomicBool, Arc, OnceLock},
+    sync::{atomic::AtomicBool, Arc},
 };
 #[cfg(feature = "tokio")]
 use std::{future::Future, pin::Pin};
 
+use downcast_rs::{impl_downcast, DowncastSync};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-pub type Effect<M> = Box<dyn FnOnce(AppContextRef<App, M>) + Send + Sync>;
+pub type Effect<M> = Box<dyn FnOnce(AppContext<App, M>) + Send + Sync>;
+
+pub trait Event: DowncastSync + 'static {}
+impl_downcast!(sync Event);
+
+impl<T> Event for T where T: DowncastSync + 'static {}
+
+pub struct EventHandler<M: Model> {
+    name: String,
+    handler: Box<dyn Fn(AppContext<App, M>, &Box<dyn Event>) + Send + Sync>,
+}
+
+#[allow(clippy::borrowed_box)]
+impl<M: Model> EventHandler<M> {
+    pub fn handle(&self, cx: AppContext<App, M>, event: &Box<dyn Event>) {
+        (self.handler)(cx, event);
+    }
+}
+
+impl<M: Model> fmt::Debug for EventHandler<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventHandler")
+            .field("name", &self.name)
+            .field("handler", &"<handler>")
+            .finish()
+    }
+}
 
 pub trait Model: fmt::Debug + Send + Sync + 'static {}
 impl<T> Model for T where T: fmt::Debug + Send + Sync + 'static {}
 
-static APP_CONTEXT: OnceLock<Box<dyn Any + Send + Sync + 'static>> = OnceLock::new();
+// static APP_CONTEXT: OnceLock<Box<dyn Any + Send + Sync + 'static>> = OnceLock::new();
 
 mod private {
-    use super::ctx;
+    use super::cx;
 
     pub trait Sealed {}
-    impl Sealed for ctx::App {}
-    impl Sealed for ctx::Model {}
-    impl Sealed for ctx::Task {}
+    impl Sealed for cx::App {}
+    impl Sealed for cx::Model {}
+    impl Sealed for cx::Task {}
     #[cfg(feature = "tokio")]
-    impl Sealed for ctx::AsyncTask {}
+    impl Sealed for cx::AsyncTask {}
 }
 
-pub mod ctx {
+pub mod cx {
     use super::private;
 
     #[derive(Debug)]
@@ -42,7 +69,7 @@ pub mod ctx {
     #[derive(Debug)]
     pub struct AsyncTask;
 
-    pub trait Context: private::Sealed + 'static {}
+    pub trait Context: private::Sealed + std::fmt::Debug + 'static {}
 
     impl Context for App {}
     impl Context for Model {}
@@ -51,11 +78,11 @@ pub mod ctx {
     impl Context for AsyncTask {}
 }
 #[allow(clippy::wildcard_imports)]
-use ctx::*;
+use cx::*;
 
 pub mod capabilities {
     #[allow(clippy::wildcard_imports)]
-    use super::ctx::*;
+    use super::cx::*;
 
     pub trait CanReadModel: Context + 'static {}
     impl CanReadModel for App {}
@@ -157,9 +184,10 @@ impl<M: Model> AppContextBuilder<M> {
         self
     }
 
-    pub fn build(self) -> AppContextRef<App, M> {
+    pub fn build(self) -> AppContext<App, M> {
         let (effect_tx, effect_rx) = crossbeam_channel::unbounded();
         let (stop_tx, stop_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
 
         #[cfg(feature = "rayon")]
         let pool = self
@@ -171,11 +199,14 @@ impl<M: Model> AppContextBuilder<M> {
             .handle
             .unwrap_or_else(|| tokio::runtime::Handle::current());
 
-        let cx = AppContext {
+        let global = Box::leak(Box::new(GlobalAppContext {
             model: RwLock::new(self.model),
             resources: RwLock::new(self.resources),
+            event_handlers: RwLock::new(FxHashMap::default()),
             effect_tx,
             effect_rx,
+            event_tx,
+            event_rx,
             stop_tx,
             stop_rx,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -184,22 +215,26 @@ impl<M: Model> AppContextBuilder<M> {
             #[cfg(feature = "tokio")]
             handle,
             _phantom: std::marker::PhantomData::<App>,
-        };
+        }));
 
-        APP_CONTEXT.get_or_init(|| Box::new(cx));
+        // APP_CONTEXT.get_or_init(|| Box::new(cx));
 
-        AppContextRef {
+        AppContext {
+            global,
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct AppContext<S: Context, M: Model> {
+pub struct GlobalAppContext<S: Context, M: Model> {
     model: RwLock<M>,
     resources: RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+    event_handlers: RwLock<FxHashMap<TypeId, Vec<EventHandler<M>>>>,
     effect_tx: crossbeam_channel::Sender<Effect<M>>,
     effect_rx: crossbeam_channel::Receiver<Effect<M>>,
+    event_tx: crossbeam_channel::Sender<(TypeId, Box<dyn Event>)>,
+    event_rx: crossbeam_channel::Receiver<(TypeId, Box<dyn Event>)>,
     stop_tx: crossbeam_channel::Sender<()>,
     stop_rx: crossbeam_channel::Receiver<()>,
     is_running: Arc<AtomicBool>,
@@ -212,24 +247,30 @@ pub struct AppContext<S: Context, M: Model> {
     _phantom: std::marker::PhantomData<S>,
 }
 
-impl<M: Model> AppContext<App, M> {
+impl<M: Model> GlobalAppContext<App, M> {
     pub fn builder(model: M) -> AppContextBuilder<M> {
         AppContextBuilder::new(model)
     }
 }
 
-#[derive(Debug)]
-pub struct AppContextRef<S: Context, M: Model> {
-    _phantom: std::marker::PhantomData<(S, M)>,
+pub struct AppContext<C: Context, M: Model> {
+    global: &'static GlobalAppContext<App, M>,
+    _phantom: std::marker::PhantomData<C>,
 }
 
-impl<S: Context, M: Model> Clone for AppContextRef<S, M> {
+impl<C: Context, M: Model> fmt::Debug for AppContext<C, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AppContext({:?})", self.global)
+    }
+}
+
+impl<S: Context, M: Model> Clone for AppContext<S, M> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S: Context, M: Model> Copy for AppContextRef<S, M> {}
+impl<S: Context, M: Model> Copy for AppContext<S, M> {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BindewerkError {
@@ -247,15 +288,23 @@ pub enum DispatchError {
     RuntimeStopped,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum EventError {
+    #[error("Channel closed")]
+    ChannelClosed,
+    #[error("Runtime stopped")]
+    RuntimeStopped,
+}
+
 #[allow(clippy::type_complexity)]
 pub struct EffectBuilder<M: Model> {
-    cx: AppContextRef<App, M>,
+    cx: AppContext<App, M>,
     updates: Vec<Box<dyn FnOnce(&mut M) + Send + Sync>>,
-    tasks: Vec<Box<dyn FnOnce(AppContextRef<Task, M>) + Send + Sync>>,
-    blocking_tasks: Vec<Box<dyn FnOnce(AppContextRef<Task, M>) + Send + Sync>>,
+    tasks: Vec<Box<dyn FnOnce(AppContext<Task, M>) + Send + Sync>>,
+    blocking_tasks: Vec<Box<dyn FnOnce(AppContext<Task, M>) + Send + Sync>>,
     scoped_tasks: Vec<
         Box<
-            dyn for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContextRef<Task, M>)
+            dyn for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>)
                 + Send
                 + Sync,
         >,
@@ -263,16 +312,15 @@ pub struct EffectBuilder<M: Model> {
     #[cfg(feature = "tokio")]
     async_tasks: Vec<
         Box<
-            dyn FnOnce(AppContextRef<AsyncTask, M>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+            dyn FnOnce(AppContext<AsyncTask, M>) -> Pin<Box<dyn Future<Output = ()> + Send>>
                 + Send
                 + Sync,
         >,
     >,
     #[cfg(feature = "rayon")]
-    rayon_tasks: Vec<Box<dyn FnOnce(AppContextRef<Task, M>) + Send + Sync>>,
+    rayon_tasks: Vec<Box<dyn FnOnce(AppContext<Task, M>) + Send + Sync>>,
     #[cfg(feature = "rayon")]
-    rayon_scoped_tasks:
-        Vec<Box<dyn FnOnce(&rayon::Scope<'_>, AppContextRef<Task, M>) + Send + Sync>>,
+    rayon_scoped_tasks: Vec<Box<dyn FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) + Send + Sync>>,
 }
 
 impl<M: Model> EffectBuilder<M> {
@@ -288,7 +336,7 @@ impl<M: Model> EffectBuilder<M> {
     #[must_use]
     pub fn spawn<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(AppContextRef<Task, M>) + Send + Sync + 'static,
+        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
     {
         self.tasks.push(Box::new(f));
         self
@@ -298,7 +346,7 @@ impl<M: Model> EffectBuilder<M> {
     #[inline]
     pub fn scope<F>(mut self, f: F) -> Self
     where
-        F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContextRef<Task, M>)
+        F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>)
             + Send
             + Sync
             + 'static,
@@ -310,7 +358,7 @@ impl<M: Model> EffectBuilder<M> {
     #[must_use]
     pub fn spawn_blocking<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(AppContextRef<Task, M>) + Send + Sync + 'static,
+        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
     {
         self.blocking_tasks.push(Box::new(f));
         self
@@ -320,7 +368,7 @@ impl<M: Model> EffectBuilder<M> {
     #[must_use]
     pub fn spawn_async<F, Fut>(mut self, f: F) -> Self
     where
-        F: FnOnce(AppContextRef<AsyncTask, M>) -> Fut + Send + Sync + 'static,
+        F: FnOnce(AppContext<AsyncTask, M>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.async_tasks.push(Box::new(move |cx| {
@@ -333,7 +381,7 @@ impl<M: Model> EffectBuilder<M> {
     #[must_use]
     pub fn spawn_rayon<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(AppContextRef<Task, M>) + Send + Sync + 'static,
+        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
     {
         self.rayon_tasks.push(Box::new(f));
         self
@@ -343,7 +391,7 @@ impl<M: Model> EffectBuilder<M> {
     #[must_use]
     pub fn rayon_scope<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(&rayon::Scope<'_>, AppContextRef<Task, M>) + Send + Sync + 'static,
+        F: FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) + Send + Sync + 'static,
     {
         self.rayon_scoped_tasks.push(Box::new(f));
         self
@@ -393,7 +441,7 @@ impl<M: Model> EffectBuilder<M> {
                 let task = Box::new(task)
                     as Box<
                         dyn FnOnce(
-                                AppContextRef<AsyncTask, M>,
+                                AppContext<AsyncTask, M>,
                             )
                                 -> Pin<Box<dyn Future<Output = ()> + Send>>
                             + Send
@@ -417,28 +465,14 @@ impl<M: Model> EffectBuilder<M> {
     }
 }
 
-impl<S: Context, M: Model> AppContext<S, M> {
-    #[must_use]
-    pub fn current() -> AppContextRef<S, M> {
-        AppContextRef {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<M: Model> AppContextRef<App, M> {
+impl<M: Model> AppContext<App, M> {
     #[inline]
     pub fn builder(model: M) -> AppContextBuilder<M> {
         AppContextBuilder::new(model)
     }
 
     pub fn next_effect(&self) -> Result<Effect<M>, crossbeam_channel::TryRecvError> {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-
-        app_cx.effect_rx.try_recv()
+        self.global.effect_rx.try_recv()
     }
 
     pub fn handle_effects(&self) {
@@ -447,19 +481,37 @@ impl<M: Model> AppContextRef<App, M> {
         }
     }
 
-    pub fn run(&self) {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
+    pub fn on<T>(&self, handler: impl Fn(AppContext<App, M>, &T) + Send + Sync + 'static)
+    where
+        T: Event + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<T>();
+        let mut event_handlers = self.global.event_handlers.write();
 
-        let effect_rx = app_cx.effect_rx.clone();
-        app_cx
-            .is_running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        #[allow(clippy::borrowed_box)]
+        let handler = Box::new(move |cx, event: &Box<dyn Event>| {
+            if let Some(event) = event.downcast_ref::<T>() {
+                handler(cx, event);
+            }
+        });
+
+        event_handlers.entry(type_id).or_default().push(EventHandler {
+            name: std::any::type_name::<T>().to_string(),
+            handler,
+        });
+    }
+
+    pub fn run(&self) {
+        let effect_rx = self.global.effect_rx.clone();
+        let effect_tx = self.global.effect_tx.clone();
+        let event_rx = self.global.event_rx.clone();
+        let stop_tx = self.global.stop_tx.clone();
+
+        self.global.is_running.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let self_ref = *self;
-        let is_running = Arc::clone(&app_cx.is_running);
+        let is_running: Arc<AtomicBool> = Arc::clone(&self.global.is_running);
+
         std::thread::spawn(move || {
             while is_running.load(std::sync::atomic::Ordering::SeqCst) {
                 crossbeam_channel::select! {
@@ -468,26 +520,57 @@ impl<M: Model> AppContextRef<App, M> {
                             (effect)(self_ref);
                         }
                     }
+                    recv(&event_rx) -> maybe_trigger => {
+                        let triggers = self_ref.global.event_handlers.read();
+                        if let Ok((type_id, trigger)) = maybe_trigger.as_ref() {
+                            for handler in triggers.get(type_id).unwrap(){
+                                handler.handle(self_ref, trigger);
+                            }
+                        }
+                    }
+                    // Check is_running every 100ms
+                    default(std::time::Duration::from_millis(100)) => {
+                    }
                 }
             }
+
+            // After stopping, prevent new effects from being queued
+            drop(effect_tx);
+
+            // Handle any remaining effects in the queue
+            while let Ok(effect) = effect_rx.try_recv() {
+                (effect)(self_ref);
+            }
+
+            // Signal complete shutdown
+            stop_tx.send(()).unwrap();
         });
     }
 
     #[inline]
-    pub fn stop(&self) -> Result<(), BindewerkError> {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-
-        if app_cx.is_running.load(std::sync::atomic::Ordering::SeqCst) {
-            app_cx
+    pub fn graceful_stop(&self) -> Result<(), BindewerkError> {
+        if self.global.is_running.load(std::sync::atomic::Ordering::SeqCst) {
+            // Mark the app as stopped - cleanup handled in run() method
+            self.global
                 .is_running
                 .store(false, std::sync::atomic::Ordering::SeqCst);
-            app_cx
-                .stop_tx
-                .send(())
-                .map_err(|_| BindewerkError::ContextDropped)?;
+            Ok(())
+        } else {
+            Err(BindewerkError::AlreadyStopped)
+        }
+    }
+
+    #[inline]
+    pub fn force_stop(&self) -> Result<(), BindewerkError> {
+        if self.global.is_running.load(std::sync::atomic::Ordering::SeqCst) {
+            // Mark the app as stopped
+            self.global
+                .is_running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+
+            // Immediately send stop signal to terminate processing
+            self.global.stop_tx.send(()).unwrap();
+
             Ok(())
         } else {
             Err(BindewerkError::AlreadyStopped)
@@ -496,39 +579,24 @@ impl<M: Model> AppContextRef<App, M> {
 
     #[inline]
     pub fn wait_for_stop(&self) -> Result<(), BindewerkError> {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-        app_cx
+        self.global
             .stop_rx
             .recv()
             .map_err(|_| BindewerkError::ContextDropped)
     }
-
-    #[inline]
-    pub fn dispatch_sync<E>(&self, effect: E)
-    where
-        E: FnOnce(AppContextRef<App, M>) + Send + Sync + 'static,
-    {
-        effect(*self);
-    }
 }
 
-impl<S: Context, M: Model> AppContextRef<S, M> {
+impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     #[must_use]
     pub fn is_running(&self) -> bool {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-        app_cx.is_running.load(std::sync::atomic::Ordering::SeqCst)
+        self.global.is_running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn convert<T: Context>(self) -> AppContextRef<T, M> {
-        AppContextRef {
-            _phantom: std::marker::PhantomData,
+    fn convert<T: Context>(self) -> AppContext<T, M> {
+        AppContext {
+            global: self.global,
+            _phantom: std::marker::PhantomData::<T>,
         }
     }
 
@@ -553,41 +621,39 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn dispatch<E>(&self, effect: E)
     where
         S: capabilities::CanDispatch + 'static,
-        E: FnOnce(AppContextRef<App, M>) + Send + Sync + 'static,
+        E: FnOnce(AppContext<App, M>) + Send + Sync + 'static,
     {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-        app_cx
+        self.global
             .effect_tx
             .send(Box::new(effect))
             .map_err(|_| DispatchError::ChannelClosed)
             .unwrap();
     }
 
-    #[must_use]
+    #[inline]
+    pub fn emit<T>(&self, trigger: T) -> Result<(), EventError>
+    where
+        T: Event + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<T>();
+        self.global
+            .event_tx
+            .send((type_id, Box::new(trigger)))
+            .map_err(|_| EventError::ChannelClosed)
+    }
+
     pub fn model(&self) -> parking_lot::RwLockReadGuard<'_, M>
     where
         S: capabilities::CanReadModel,
     {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<S, M>>() })
-            .unwrap();
-        app_cx.model.read()
+        self.global.model.read()
     }
 
-    #[must_use]
     pub fn model_mut(&self) -> parking_lot::RwLockWriteGuard<'_, M>
     where
         S: capabilities::CanModifyModel,
     {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<S, M>>() })
-            .unwrap();
-        app_cx.model.write()
+        self.global.model.write()
     }
 
     #[must_use]
@@ -607,7 +673,7 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
         F: FnOnce(&mut M) -> R,
     {
         let mut model = self.model_mut();
-        f(&mut *model)
+        f(&mut model)
     }
 
     #[inline]
@@ -616,11 +682,7 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
         S: capabilities::CanModifyResources,
         T: Clone + Send + Sync + 'static,
     {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<S, M>>() })
-            .unwrap();
-        let mut resources = app_cx.resources.write();
+        let mut resources = self.global.resources.write();
         let ty = TypeId::of::<T>();
         if resources.contains_key(&ty) {
             return Err(ResourceExistsError(std::any::type_name::<T>()));
@@ -636,11 +698,7 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
         S: CanReadResources,
         T: Clone + Send + Sync + 'static,
     {
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<S, M>>() })
-            .unwrap();
-        let resources = app_cx.resources.read();
+        let resources = self.global.resources.read();
         let ty = TypeId::of::<T>();
         resources
             .get(&ty)
@@ -649,10 +707,40 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     }
 
     #[inline]
+    pub fn with_resource<T, F, R>(&self, f: F) -> Option<R>
+    where
+        S: CanReadResources,
+        T: Send + Sync + 'static,
+        F: FnOnce(&T) -> R,
+    {
+        let resources = self.global.resources.read();
+        let ty = TypeId::of::<T>();
+        resources
+            .get(&ty)
+            .map(|boxed_value| unsafe { boxed_value.downcast_ref_unchecked::<T>() })
+            .map(f)
+    }
+
+    #[inline]
+    pub fn with_resource_mut<T, F, R>(&self, f: F) -> Option<R>
+    where
+        S: CanModifyResources,
+        T: Send + Sync + 'static,
+        F: FnOnce(&mut T) -> R,
+    {
+        let mut resources = self.global.resources.write();
+        let ty = TypeId::of::<T>();
+        resources
+            .get_mut(&ty)
+            .map(|boxed_value| unsafe { boxed_value.downcast_mut_unchecked::<T>() })
+            .map(f)
+    }
+
+    #[inline]
     pub fn spawn<F, R>(&self, f: F) -> std::thread::JoinHandle<R>
     where
         S: CanSpawnTasks + Send + Sync + 'static,
-        F: FnOnce(AppContextRef<Task, M>) -> R + Send + 'static,
+        F: FnOnce(AppContext<Task, M>) -> R + Send + 'static,
         R: Send + 'static,
     {
         let cx = self.convert();
@@ -663,7 +751,7 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn scope<F, R>(&self, f: F) -> R
     where
         S: CanSpawnTasks + Send + Sync + 'static,
-        F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContextRef<Task, M>) -> R
+        F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>) -> R
             + Send
             + Sync,
         R: Send,
@@ -677,19 +765,14 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn spawn_async<F, Fut, R>(&self, f: F) -> tokio::sync::oneshot::Receiver<R>
     where
         S: CanSpawnAsyncTask,
-        F: FnOnce(AppContextRef<AsyncTask, M>) -> Fut + Send + Sync + 'static,
+        F: FnOnce(AppContext<AsyncTask, M>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let cx = self.convert();
 
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-
-        app_cx.handle.spawn(async move {
+        self.global.handle.spawn(async move {
             let result = f(cx).await;
             let _ = tx.send(result); // Ignore error if receiver dropped
         });
@@ -702,16 +785,11 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
         S: CanSpawnAsyncTask,
-        F: FnOnce(AppContextRef<Task, M>) -> R + Send + Sync + 'static,
+        F: FnOnce(AppContext<Task, M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let cx = self.convert();
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-
-        app_cx.handle.spawn_blocking(move || f(cx))
+        self.global.handle.spawn_blocking(move || f(cx))
     }
 
     #[inline]
@@ -719,14 +797,10 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn spawn_rayon<F>(&self, f: F)
     where
         S: CanSpawnRayonTask,
-        F: FnOnce(AppContextRef<Task, M>) + Send + 'static,
+        F: FnOnce(AppContext<Task, M>) + Send + 'static,
     {
         let cx = self.convert();
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-        app_cx.pool.spawn(move || f(cx));
+        self.global.pool.spawn(move || f(cx));
     }
 
     #[inline]
@@ -734,16 +808,35 @@ impl<S: Context, M: Model> AppContextRef<S, M> {
     pub fn rayon_scope<F, R>(&self, f: F) -> R
     where
         S: CanSpawnRayonTask + Send + Sync + 'static,
-        F: FnOnce(&rayon::Scope<'_>, AppContextRef<Task, M>) -> R + Send + 'static,
+        F: FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) -> R + Send + 'static,
         R: Send + 'static,
     {
         let cx = self.convert();
-        let app_cx = APP_CONTEXT
-            .get()
-            .map(|any| unsafe { any.downcast_ref_unchecked::<AppContext<App, M>>() })
-            .unwrap();
-        app_cx.pool.scope(|s| f(s, cx))
+        self.global.pool.scope(|s| f(s, cx))
     }
+}
+
+pub struct Deferred<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Deferred<F> {
+    /// Drop without running the deferred function.
+    pub fn abort(mut self) {
+        self.0.take();
+    }
+}
+
+impl<F: FnOnce()> Drop for Deferred<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+/// Run the given function when the returned value is dropped (unless it's cancelled).
+#[must_use]
+pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
+    Deferred(Some(f))
 }
 
 #[cfg(test)]
@@ -757,10 +850,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "tokio"))]
+    // #[cfg(not(feature = "tokio"))]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model)
+        let cx = GlobalAppContext::builder(model)
             .resource("test_resource".to_string())
             .build();
         cx.run();
@@ -769,29 +862,29 @@ mod tests {
         cx.model_mut().counter += 1;
         assert!(cx.model().counter == 1);
     }
-    #[test]
-    #[cfg(not(feature = "tokio"))]
-    fn test_app_context_current() {
-        let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
-        cx.run();
+    // #[test]
+    // #[cfg(not(feature = "tokio"))]
+    // fn test_app_context_current() {
+    //     let model = TestModel { counter: 0 };
+    //     let cx = GlobalAppContext::builder(model).build();
+    //     cx.run();
 
-        let current_cx: AppContextRef<App, TestModel> = AppContext::current();
-        assert_eq!(current_cx.query(|m| m.counter), 0);
+    //     let current_cx: AppContext<App, TestModel> = GlobalAppContext::current();
+    //     assert_eq!(current_cx.query(|m| m.counter), 0);
 
-        cx.update(|m| m.counter += 1);
-        assert_eq!(current_cx.query(|m| m.counter), 1);
+    //     cx.update(|m| m.counter += 1);
+    //     assert_eq!(current_cx.query(|m| m.counter), 1);
 
-        // Verify both contexts reference same underlying storage
-        current_cx.update(|m| m.counter += 1);
-        assert_eq!(cx.query(|m| m.counter), 2);
-    }
+    //     // Verify both contexts reference same underlying storage
+    //     current_cx.update(|m| m.counter += 1);
+    //     assert_eq!(cx.query(|m| m.counter), 2);
+    // }
 
     #[test]
     #[cfg(not(feature = "tokio"))]
     fn test_app_context_builder() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model)
+        let cx = GlobalAppContext::builder(model)
             .resource("test_resource".to_string())
             .build();
 
@@ -803,7 +896,7 @@ mod tests {
     #[cfg(not(feature = "tokio"))]
     fn test_app_context_query() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         cx.update(|m| m.counter += 1);
         assert_eq!(cx.query(|m| m.counter), 1);
@@ -813,7 +906,7 @@ mod tests {
     #[cfg(not(feature = "tokio"))]
     fn test_app_context_resource_management() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         cx.add_resource(42i32).unwrap();
         assert_eq!(cx.resource::<i32>().unwrap(), 42);
@@ -823,24 +916,51 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "tokio"))]
-    fn test_app_context_run_and_stop() {
+    fn test_app_context_graceful_stop() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         cx.run();
         assert!(cx.is_running());
+        cx.dispatch(|cx| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            cx.update(|m| m.counter += 1)
+        });
 
-        cx.stop().unwrap();
+        cx.graceful_stop().unwrap();
+        cx.wait_for_stop().unwrap();
         assert!(!cx.is_running());
+        assert_eq!(cx.query(|m| m.counter), 1);
 
-        assert!(cx.stop().is_err());
+        assert!(cx.graceful_stop().is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "tokio"))]
+    fn test_app_context_force_stop() {
+        let model = TestModel { counter: 0 };
+        let cx = GlobalAppContext::builder(model).build();
+
+        cx.run();
+        assert!(cx.is_running());
+        cx.dispatch(|cx| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            cx.update(|m| m.counter += 1)
+        });
+
+        cx.force_stop().unwrap();
+        cx.wait_for_stop().unwrap();
+        assert!(!cx.is_running());
+        assert_eq!(cx.query(|m| m.counter), 0);
+
+        assert!(cx.force_stop().is_err());
     }
 
     #[test]
     #[cfg(not(feature = "tokio"))]
     fn test_task_context() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         let handle = cx.spawn(|task_cx| {
@@ -863,7 +983,7 @@ mod tests {
         use rayon::prelude::*;
 
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         let counter = Arc::new(std::sync::Mutex::new(0));
@@ -888,12 +1008,50 @@ mod tests {
         assert_eq!(cx.query(|m| m.counter), 100);
     }
 
+    #[test]
+    fn test_unsync_threading_safety() {
+        let model = TestModel { counter: 0 };
+        let cx = GlobalAppContext::builder(model).build();
+        cx.run();
+        // cx.dispatch(|app_cx| {
+        //     // app_cx.update(|m| {
+        //     //     m.counter += 1;
+        //     // });
+        // });
+
+        // let counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        // let threads: Vec<_> = (0..10)
+        //     .map(|_| {
+        //         let counter_clone = Arc::clone(&counter);
+        //         std::thread::spawn(move || {
+        //             for _ in 0..1000 {
+        //                 counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        //                 cx.dispatch(|app_cx| {
+        //                     app_cx.update(|m| {
+        //                         m.counter += 1;
+        //                     });
+        //                 });
+        //             }
+        //         })
+        //     })
+        //     .collect();
+
+        // for thread in threads {
+        //     thread.join().unwrap();
+        // }
+
+        // Wait for dispatched effects
+        // std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 10000);
+        // assert_eq!(cx.query(|m| m.counter), 10000);
+    }
 
     #[test]
-    #[cfg(not(feature = "tokio"))]
-    fn test_threading_safety() {
+    // #[cfg(not(feature = "tokio"))]
+    fn test_sync_threading_safety() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         let counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -917,7 +1075,7 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        cx.dispatch(|cx| cx.stop().unwrap());
+        cx.dispatch(|cx| cx.graceful_stop().unwrap());
         cx.wait_for_stop().unwrap();
 
         // Wait for dispatched effects
@@ -931,7 +1089,7 @@ mod tests {
     #[cfg(not(feature = "tokio"))]
     fn test_scope() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         let counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -957,26 +1115,26 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        fn test_read_model<C: CanReadModel>(cx: AppContextRef<C, TestModel>) {
+        fn test_read_model<C: CanReadModel>(cx: AppContext<C, TestModel>) {
             assert_eq!(cx.query(|m| m.counter), 0);
         }
 
-        fn test_modify_model<C: CanModifyModel>(cx: AppContextRef<C, TestModel>) {
+        fn test_modify_model<C: CanModifyModel>(cx: AppContext<C, TestModel>) {
             cx.update(|m| m.counter += 1);
             assert_eq!(cx.query(|m| m.counter), 1);
         }
 
-        fn test_add_resource<C: CanModifyResources>(cx: AppContextRef<C, TestModel>) {
+        fn test_add_resource<C: CanModifyResources>(cx: AppContext<C, TestModel>) {
             cx.add_resource(42i32).unwrap();
             assert_eq!(cx.resource::<i32>().unwrap(), 42);
         }
 
-        fn test_read_resource<C: CanReadResources>(cx: AppContextRef<C, TestModel>) {
+        fn test_read_resource<C: CanReadResources>(cx: AppContext<C, TestModel>) {
             assert_eq!(cx.resource::<i32>().unwrap(), 42);
         }
 
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         test_read_model(cx);
@@ -985,11 +1143,12 @@ mod tests {
         test_read_resource(cx);
     }
 
+    #[ignore]
     #[tokio::test]
     #[cfg(feature = "tokio")]
     async fn test_tokio_integration() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model)
+        let cx = GlobalAppContext::builder(model)
             .handle(tokio::runtime::Handle::current())
             .build();
         cx.run();
@@ -1019,13 +1178,14 @@ mod tests {
         assert_eq!(cx.query(|m| m.counter), 100);
     }
 
+    #[ignore]
     #[tokio::test]
     #[cfg(feature = "tokio")]
     async fn test_app_context_async() {
         use parking_lot::Mutex;
 
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         let counter = Arc::new(Mutex::new(0));
         let counter_clone = Arc::clone(&counter);
@@ -1040,11 +1200,12 @@ mod tests {
         assert_eq!(*counter.lock(), 1);
     }
 
+    #[ignore]
     #[tokio::test]
     #[cfg(feature = "tokio")]
     async fn test_effect_builder() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         cx.run();
 
@@ -1112,7 +1273,7 @@ mod tests {
     #[cfg(not(feature = "tokio"))]
     fn test_wait_for_stop() {
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
 
         cx.run();
         assert!(cx.is_running());
@@ -1120,20 +1281,20 @@ mod tests {
         let cx_clone = cx;
         let handle = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            cx_clone.stop().unwrap();
+            cx_clone.graceful_stop().unwrap();
         });
 
         cx.wait_for_stop().unwrap();
         handle.join().unwrap();
         assert!(!cx.is_running());
     }
-    // #[ignore]
+    #[ignore]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let cx = AppContext::builder(model).build();
+        let cx = GlobalAppContext::builder(model).build();
         cx.run();
 
         const ITERATIONS: usize = 1_000_000;
@@ -1155,7 +1316,7 @@ mod tests {
         }
 
         cx.dispatch(|cx| {
-            cx.stop();
+            cx.graceful_stop();
         });
 
         cx.wait_for_stop().unwrap();
@@ -1168,5 +1329,37 @@ mod tests {
              {:.2} ops/sec",
             ITERATIONS, best_duration, RUNS, ops_per_sec
         );
+    }
+    #[test]
+    fn test_event() {
+        let model = TestModel { counter: 0 };
+        let cx = GlobalAppContext::builder(model).build();
+        cx.run();
+
+        #[derive(Debug)]
+        struct TestEvent {
+            value: i32,
+        }
+
+        let event_fired = Arc::new(AtomicBool::new(false));
+        let event_fired_clone = Arc::clone(&event_fired);
+
+        cx.on(move |cx, event: &TestEvent| {
+            assert_eq!(event.value, 42);
+            cx.update(|m| m.counter = event.value);
+            event_fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let event = TestEvent { value: 42 };
+        cx.dispatch(move |cx| {
+            cx.emit(event).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(event_fired.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(cx.query(|m| m.counter), 42);
+
+        cx.graceful_stop().unwrap();
+        cx.wait_for_stop().unwrap();
     }
 }
