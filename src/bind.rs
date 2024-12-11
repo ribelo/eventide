@@ -10,7 +10,20 @@ use downcast_rs::{impl_downcast, DowncastSync};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-pub type Effect<M> = Box<dyn FnOnce(AppContext<App, M>) + Send + Sync>;
+// pub type Effect<M> = Box<dyn FnOnce(AppContext<App, M>) + Send + Sync>;
+
+pub trait Effect<M: Model>: Send + Sync + 'static {
+    fn handle(self: Box<Self>, context: AppContext<App, M>);
+}
+
+impl<M: Model, F> Effect<M> for F
+where
+    F: FnOnce(AppContext<App, M>) + Send + Sync + 'static,
+{
+    fn handle(self: Box<Self>, context: AppContext<App, M>) {
+        (*self)(context)
+    }
+}
 
 pub trait Event: DowncastSync + 'static {}
 impl_downcast!(sync Event);
@@ -52,6 +65,24 @@ mod private {
     impl Sealed for cx::Task {}
     #[cfg(feature = "tokio")]
     impl Sealed for cx::AsyncTask {}
+}
+
+pub trait FromContext<C, M>
+where
+    C: cx::Context,
+    M: Model,
+{
+    fn from_context(cx: AppContext<C, M>) -> Self;
+}
+
+impl<C, M> FromContext<C, M> for AppContext<App, M>
+where
+    C: cx::Context,
+    M: Model,
+{
+    fn from_context(cx: AppContext<C, M>) -> Self {
+        cx.convert()
+    }
 }
 
 pub mod cx {
@@ -231,8 +262,8 @@ pub struct GlobalAppContext<S: Context, M: Model> {
     model: RwLock<M>,
     resources: RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     event_handlers: RwLock<FxHashMap<TypeId, Vec<EventHandler<M>>>>,
-    effect_tx: crossbeam_channel::Sender<Effect<M>>,
-    effect_rx: crossbeam_channel::Receiver<Effect<M>>,
+    effect_tx: crossbeam_channel::Sender<Box<dyn Effect<M>>>,
+    effect_rx: crossbeam_channel::Receiver<Box<dyn Effect<M>>>,
     event_tx: crossbeam_channel::Sender<(TypeId, Box<dyn Event>)>,
     event_rx: crossbeam_channel::Receiver<(TypeId, Box<dyn Event>)>,
     stop_tx: crossbeam_channel::Sender<()>,
@@ -323,147 +354,147 @@ pub struct EffectBuilder<M: Model> {
     rayon_scoped_tasks: Vec<Box<dyn FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) + Send + Sync>>,
 }
 
-impl<M: Model> EffectBuilder<M> {
-    #[must_use]
-    pub fn update<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&mut M) + Send + Sync + 'static,
-    {
-        self.updates.push(Box::new(f));
-        self
-    }
+// impl<M: Model> EffectBuilder<M> {
+//     #[must_use]
+//     pub fn update<F>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(&mut M) + Send + Sync + 'static,
+//     {
+//         self.updates.push(Box::new(f));
+//         self
+//     }
 
-    #[must_use]
-    pub fn spawn<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
-    {
-        self.tasks.push(Box::new(f));
-        self
-    }
+//     #[must_use]
+//     pub fn spawn<F>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
+//     {
+//         self.tasks.push(Box::new(f));
+//         self
+//     }
 
-    #[must_use]
-    #[inline]
-    pub fn scope<F>(mut self, f: F) -> Self
-    where
-        F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>)
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.scoped_tasks.push(Box::new(f));
-        self
-    }
+//     #[must_use]
+//     #[inline]
+//     pub fn scope<F>(mut self, f: F) -> Self
+//     where
+//         F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>)
+//             + Send
+//             + Sync
+//             + 'static,
+//     {
+//         self.scoped_tasks.push(Box::new(f));
+//         self
+//     }
 
-    #[must_use]
-    pub fn spawn_blocking<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
-    {
-        self.blocking_tasks.push(Box::new(f));
-        self
-    }
+//     #[must_use]
+//     pub fn spawn_blocking<F>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
+//     {
+//         self.blocking_tasks.push(Box::new(f));
+//         self
+//     }
 
-    #[cfg(feature = "tokio")]
-    #[must_use]
-    pub fn spawn_async<F, Fut>(mut self, f: F) -> Self
-    where
-        F: FnOnce(AppContext<AsyncTask, M>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        self.async_tasks.push(Box::new(move |cx| {
-            Box::pin(f(cx)) as Pin<Box<dyn Future<Output = ()> + Send>>
-        }));
-        self
-    }
+//     #[cfg(feature = "tokio")]
+//     #[must_use]
+//     pub fn spawn_async<F, Fut>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(AppContext<AsyncTask, M>) -> Fut + Send + Sync + 'static,
+//         Fut: Future<Output = ()> + Send + 'static,
+//     {
+//         self.async_tasks.push(Box::new(move |cx| {
+//             Box::pin(f(cx)) as Pin<Box<dyn Future<Output = ()> + Send>>
+//         }));
+//         self
+//     }
 
-    #[cfg(feature = "rayon")]
-    #[must_use]
-    pub fn spawn_rayon<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
-    {
-        self.rayon_tasks.push(Box::new(f));
-        self
-    }
+//     #[cfg(feature = "rayon")]
+//     #[must_use]
+//     pub fn spawn_rayon<F>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(AppContext<Task, M>) + Send + Sync + 'static,
+//     {
+//         self.rayon_tasks.push(Box::new(f));
+//         self
+//     }
 
-    #[cfg(feature = "rayon")]
-    #[must_use]
-    pub fn rayon_scope<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) + Send + Sync + 'static,
-    {
-        self.rayon_scoped_tasks.push(Box::new(f));
-        self
-    }
+//     #[cfg(feature = "rayon")]
+//     #[must_use]
+//     pub fn rayon_scope<F>(mut self, f: F) -> Self
+//     where
+//         F: FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) + Send + Sync + 'static,
+//     {
+//         self.rayon_scoped_tasks.push(Box::new(f));
+//         self
+//     }
 
-    pub fn dispatch(self) {
-        let updates = self.updates;
-        let tasks = self.tasks;
+//     pub fn dispatch(self) {
+//         let updates = self.updates;
+//         let tasks = self.tasks;
 
-        #[cfg(feature = "tokio")]
-        let blocking_tasks = self.blocking_tasks;
-        let scoped_tasks = self.scoped_tasks;
-        #[cfg(feature = "tokio")]
-        let async_tasks = self.async_tasks;
-        #[cfg(feature = "rayon")]
-        let parallel_tasks = self.rayon_tasks;
-        #[cfg(feature = "rayon")]
-        let parallel_scoped_tasks = self.rayon_scoped_tasks;
+//         #[cfg(feature = "tokio")]
+//         let blocking_tasks = self.blocking_tasks;
+//         let scoped_tasks = self.scoped_tasks;
+//         #[cfg(feature = "tokio")]
+//         let async_tasks = self.async_tasks;
+//         #[cfg(feature = "rayon")]
+//         let parallel_tasks = self.rayon_tasks;
+//         #[cfg(feature = "rayon")]
+//         let parallel_scoped_tasks = self.rayon_scoped_tasks;
 
-        self.cx.dispatch(move |cx| {
-            // Apply model updates first
-            cx.update(move |m| {
-                for update in updates {
-                    update(m);
-                }
-            });
+//         self.cx.dispatch(move |cx| {
+//             // Apply model updates first
+//             cx.update(move |m| {
+//                 for update in updates {
+//                     update(m);
+//                 }
+//             });
 
-            // Spawn regular tasks
-            for task in tasks {
-                cx.spawn(task);
-            }
+//             // Spawn regular tasks
+//             for task in tasks {
+//                 cx.spawn(task);
+//             }
 
-            // Execute scoped tasks
-            for task in scoped_tasks {
-                cx.scope(task);
-            }
+//             // Execute scoped tasks
+//             for task in scoped_tasks {
+//                 cx.scope(task);
+//             }
 
-            // Spawn blocking tasks using tokio
-            #[cfg(feature = "tokio")]
-            for task in blocking_tasks {
-                cx.spawn_blocking(task);
-            }
+//             // Spawn blocking tasks using tokio
+//             #[cfg(feature = "tokio")]
+//             for task in blocking_tasks {
+//                 cx.spawn_blocking(task);
+//             }
 
-            // Spawn async tasks if tokio enabled
-            #[cfg(feature = "tokio")]
-            for task in async_tasks {
-                let task = Box::new(task)
-                    as Box<
-                        dyn FnOnce(
-                                AppContext<AsyncTask, M>,
-                            )
-                                -> Pin<Box<dyn Future<Output = ()> + Send>>
-                            + Send
-                            + Sync,
-                    >;
-                cx.spawn_async(task);
-            }
+//             // Spawn async tasks if tokio enabled
+//             #[cfg(feature = "tokio")]
+//             for task in async_tasks {
+//                 let task = Box::new(task)
+//                     as Box<
+//                         dyn FnOnce(
+//                                 AppContext<AsyncTask, M>,
+//                             )
+//                                 -> Pin<Box<dyn Future<Output = ()> + Send>>
+//                             + Send
+//                             + Sync,
+//                     >;
+//                 cx.spawn_async(task);
+//             }
 
-            // Spawn parallel tasks if rayon enabled
-            #[cfg(feature = "rayon")]
-            for task in parallel_tasks {
-                cx.spawn_rayon(task);
-            }
+//             // Spawn parallel tasks if rayon enabled
+//             #[cfg(feature = "rayon")]
+//             for task in parallel_tasks {
+//                 cx.spawn_rayon(task);
+//             }
 
-            // Execute parallel scoped tasks if rayon enabled
-            #[cfg(feature = "rayon")]
-            for task in parallel_scoped_tasks {
-                cx.rayon_scope(|s, task_cx| task(s, task_cx));
-            }
-        });
-    }
-}
+//             // Execute parallel scoped tasks if rayon enabled
+//             #[cfg(feature = "rayon")]
+//             for task in parallel_scoped_tasks {
+//                 cx.rayon_scope(|s, task_cx| task(s, task_cx));
+//             }
+//         });
+//     }
+// }
 
 impl<M: Model> AppContext<App, M> {
     #[inline]
@@ -471,13 +502,13 @@ impl<M: Model> AppContext<App, M> {
         AppContextBuilder::new(model)
     }
 
-    pub fn next_effect(&self) -> Result<Effect<M>, crossbeam_channel::TryRecvError> {
+    pub fn next_effect(&self) -> Result<Box<dyn Effect<M>>, crossbeam_channel::TryRecvError> {
         self.global.effect_rx.try_recv()
     }
 
     pub fn handle_effects(&self) {
         while let Ok(effect) = self.next_effect() {
-            (effect)(*self);
+            effect.handle(self.convert());
         }
     }
 
@@ -495,10 +526,13 @@ impl<M: Model> AppContext<App, M> {
             }
         });
 
-        event_handlers.entry(type_id).or_default().push(EventHandler {
-            name: std::any::type_name::<T>().to_string(),
-            handler,
-        });
+        event_handlers
+            .entry(type_id)
+            .or_default()
+            .push(EventHandler {
+                name: std::any::type_name::<T>().to_string(),
+                handler,
+            });
     }
 
     pub fn run(&self) {
@@ -507,7 +541,9 @@ impl<M: Model> AppContext<App, M> {
         let event_rx = self.global.event_rx.clone();
         let stop_tx = self.global.stop_tx.clone();
 
-        self.global.is_running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.global
+            .is_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let self_ref = *self;
         let is_running: Arc<AtomicBool> = Arc::clone(&self.global.is_running);
@@ -517,7 +553,7 @@ impl<M: Model> AppContext<App, M> {
                 crossbeam_channel::select! {
                     recv(&effect_rx) -> maybe_effect => {
                         if let Ok(effect) = maybe_effect {
-                            (effect)(self_ref);
+                            effect.handle(self_ref);
                         }
                     }
                     recv(&event_rx) -> maybe_trigger => {
@@ -539,7 +575,7 @@ impl<M: Model> AppContext<App, M> {
 
             // Handle any remaining effects in the queue
             while let Ok(effect) = effect_rx.try_recv() {
-                (effect)(self_ref);
+                effect.handle(self_ref);
             }
 
             // Signal complete shutdown
@@ -549,7 +585,11 @@ impl<M: Model> AppContext<App, M> {
 
     #[inline]
     pub fn graceful_stop(&self) -> Result<(), BindewerkError> {
-        if self.global.is_running.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .global
+            .is_running
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             // Mark the app as stopped - cleanup handled in run() method
             self.global
                 .is_running
@@ -562,7 +602,11 @@ impl<M: Model> AppContext<App, M> {
 
     #[inline]
     pub fn force_stop(&self) -> Result<(), BindewerkError> {
-        if self.global.is_running.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .global
+            .is_running
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             // Mark the app as stopped
             self.global
                 .is_running
@@ -586,11 +630,21 @@ impl<M: Model> AppContext<App, M> {
     }
 }
 
-impl<S: Context, M: Model> AppContext<S, M> {
+impl<C: Context, M: Model> AppContext<C, M> {
     #[inline]
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.global.is_running.load(std::sync::atomic::Ordering::SeqCst)
+        self.global
+            .is_running
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn context<T>(&self) -> T
+    where
+        T: FromContext<C, M>,
+    {
+        T::from_context(self.convert::<C>())
     }
 
     fn convert<T: Context>(self) -> AppContext<T, M> {
@@ -618,14 +672,16 @@ impl<S: Context, M: Model> AppContext<S, M> {
     }
 
     #[inline]
-    pub fn dispatch<E>(&self, effect: E)
+    pub fn dispatch<E, T>(&self, effect: E)
     where
-        S: capabilities::CanDispatch + 'static,
-        E: FnOnce(AppContext<App, M>) + Send + Sync + 'static,
+        C: capabilities::CanDispatch + 'static,
+        E: FnOnce(T) + Send + Sync + 'static,
+        T: FromContext<C, M>,
     {
+        let effect = Box::new(|cx: AppContext<App, M>| effect(cx.convert().context::<T>()));
         self.global
             .effect_tx
-            .send(Box::new(effect))
+            .send(effect)
             .map_err(|_| DispatchError::ChannelClosed)
             .unwrap();
     }
@@ -644,14 +700,14 @@ impl<S: Context, M: Model> AppContext<S, M> {
 
     pub fn model(&self) -> parking_lot::RwLockReadGuard<'_, M>
     where
-        S: capabilities::CanReadModel,
+        C: capabilities::CanReadModel,
     {
         self.global.model.read()
     }
 
     pub fn model_mut(&self) -> parking_lot::RwLockWriteGuard<'_, M>
     where
-        S: capabilities::CanModifyModel,
+        C: capabilities::CanModifyModel,
     {
         self.global.model.write()
     }
@@ -660,7 +716,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn query<F, R>(&self, f: F) -> R
     where
-        S: capabilities::CanReadModel + 'static,
+        C: capabilities::CanReadModel + 'static,
         F: FnOnce(&M) -> R,
     {
         f(&self.model())
@@ -669,7 +725,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn update<F, R>(&self, f: F) -> R
     where
-        S: capabilities::CanModifyModel,
+        C: capabilities::CanModifyModel,
         F: FnOnce(&mut M) -> R,
     {
         let mut model = self.model_mut();
@@ -679,7 +735,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn add_resource<T>(&self, resource: T) -> Result<(), ResourceExistsError>
     where
-        S: capabilities::CanModifyResources,
+        C: capabilities::CanModifyResources,
         T: Clone + Send + Sync + 'static,
     {
         let mut resources = self.global.resources.write();
@@ -695,7 +751,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[must_use]
     pub fn resource<T>(&self) -> Option<T>
     where
-        S: CanReadResources,
+        C: CanReadResources,
         T: Clone + Send + Sync + 'static,
     {
         let resources = self.global.resources.read();
@@ -709,7 +765,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn with_resource<T, F, R>(&self, f: F) -> Option<R>
     where
-        S: CanReadResources,
+        C: CanReadResources,
         T: Send + Sync + 'static,
         F: FnOnce(&T) -> R,
     {
@@ -724,7 +780,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn with_resource_mut<T, F, R>(&self, f: F) -> Option<R>
     where
-        S: CanModifyResources,
+        C: CanModifyResources,
         T: Send + Sync + 'static,
         F: FnOnce(&mut T) -> R,
     {
@@ -739,7 +795,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn spawn<F, R>(&self, f: F) -> std::thread::JoinHandle<R>
     where
-        S: CanSpawnTasks + Send + Sync + 'static,
+        C: CanSpawnTasks + Send + Sync + 'static,
         F: FnOnce(AppContext<Task, M>) -> R + Send + 'static,
         R: Send + 'static,
     {
@@ -750,7 +806,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[inline]
     pub fn scope<F, R>(&self, f: F) -> R
     where
-        S: CanSpawnTasks + Send + Sync + 'static,
+        C: CanSpawnTasks + Send + Sync + 'static,
         F: for<'scope> FnOnce(&'scope std::thread::Scope<'scope, '_>, AppContext<Task, M>) -> R
             + Send
             + Sync,
@@ -764,7 +820,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[cfg(feature = "tokio")]
     pub fn spawn_async<F, Fut, R>(&self, f: F) -> tokio::sync::oneshot::Receiver<R>
     where
-        S: CanSpawnAsyncTask,
+        C: CanSpawnAsyncTask,
         F: FnOnce(AppContext<AsyncTask, M>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
@@ -784,7 +840,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[cfg(feature = "tokio")]
     pub fn spawn_blocking<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
     where
-        S: CanSpawnAsyncTask,
+        C: CanSpawnAsyncTask,
         F: FnOnce(AppContext<Task, M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
@@ -796,7 +852,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[cfg(feature = "rayon")]
     pub fn spawn_rayon<F>(&self, f: F)
     where
-        S: CanSpawnRayonTask,
+        C: CanSpawnRayonTask,
         F: FnOnce(AppContext<Task, M>) + Send + 'static,
     {
         let cx = self.convert();
@@ -807,7 +863,7 @@ impl<S: Context, M: Model> AppContext<S, M> {
     #[cfg(feature = "rayon")]
     pub fn rayon_scope<F, R>(&self, f: F) -> R
     where
-        S: CanSpawnRayonTask + Send + Sync + 'static,
+        C: CanSpawnRayonTask + Send + Sync + 'static,
         F: FnOnce(&rayon::Scope<'_>, AppContext<Task, M>) -> R + Send + 'static,
         R: Send + 'static,
     {
@@ -993,7 +1049,7 @@ mod tests {
             cx.spawn_rayon(move |task_cx| {
                 let mut lock = counter_clone.lock().unwrap();
                 *lock += 1;
-                task_cx.dispatch(|app_cx| {
+                task_cx.dispatch(|app_cx: AppContext<App, TestModel>| {
                     app_cx.update(|m| m.counter += 1);
                 });
             });
@@ -1062,8 +1118,8 @@ mod tests {
                     for _ in 0..1000 {
                         counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         cx.model_mut().counter += 1;
-                        cx.dispatch(|app_cx| {
-                            app_cx.update(|m| {
+                        cx.dispatch(|cx: AppContext<App, TestModel>| {
+                            cx.update(|m| {
                                 m.counter += 1;
                             });
                         });
@@ -1075,7 +1131,7 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        cx.dispatch(|cx| cx.graceful_stop().unwrap());
+        cx.dispatch(|cx: AppContext<App, TestModel>| cx.graceful_stop().unwrap());
         cx.wait_for_stop().unwrap();
 
         // Wait for dispatched effects
@@ -1161,8 +1217,8 @@ mod tests {
                 cx.spawn_async(move |async_cx| async move {
                     let mut lock = counter_clone.lock().await;
                     *lock += 1;
-                    async_cx.dispatch(move |app_cx| {
-                        app_cx.update(|m| m.counter += 1);
+                    async_cx.dispatch(move |cx: AppContext<App, TestModel>| {
+                        cx.update(|m| m.counter += 1);
                     });
                 })
             })
@@ -1190,7 +1246,7 @@ mod tests {
         let counter = Arc::new(Mutex::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        cx.dispatch(move |_| {
+        cx.dispatch(move |_cx: AppContext<App, TestModel>| {
             let mut lock = counter_clone.lock();
             *lock += 1;
         });
@@ -1200,74 +1256,74 @@ mod tests {
         assert_eq!(*counter.lock(), 1);
     }
 
-    #[ignore]
-    #[tokio::test]
-    #[cfg(feature = "tokio")]
-    async fn test_effect_builder() {
-        let model = TestModel { counter: 0 };
-        let cx = GlobalAppContext::builder(model).build();
+    // #[ignore]
+    // #[tokio::test]
+    // #[cfg(feature = "tokio")]
+    // async fn test_effect_builder() {
+    //     let model = TestModel { counter: 0 };
+    //     let cx = GlobalAppContext::builder(model).build();
 
-        cx.run();
+    //     cx.run();
 
-        let shared_counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
-        let counter = Arc::clone(&shared_counter);
+    //     let shared_counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    //     let counter = Arc::clone(&shared_counter);
 
-        let effect = cx
-            .effect()
-            .update(|m| m.counter += 1)
-            .spawn(|task_cx| {
-                task_cx.dispatch(|app_cx| {
-                    app_cx.update(|m| m.counter += 1);
-                });
-            })
-            .spawn_blocking(|task_cx| {
-                task_cx.dispatch(|app_cx| {
-                    app_cx.update(|m| m.counter += 1);
-                });
-            })
-            .scope(move |scope, task_cx| {
-                for _ in 0..5 {
-                    let counter = Arc::clone(&counter);
-                    scope.spawn(move || {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        task_cx.dispatch(|app_cx| {
-                            app_cx.update(|m| m.counter += 1);
-                        });
-                    });
-                }
-            })
-            .spawn_async(|async_cx| async move {
-                async_cx.dispatch(|app_cx| {
-                    app_cx.update(|m| m.counter += 1);
-                });
-            });
+    //     let effect = cx
+    //         .effect()
+    //         .update(|m| m.counter += 1)
+    //         .spawn(|task_cx| {
+    //             task_cx.dispatch(|app_cx| {
+    //                 app_cx.update(|m| m.counter += 1);
+    //             });
+    //         })
+    //         .spawn_blocking(|task_cx| {
+    //             task_cx.dispatch(|app_cx| {
+    //                 app_cx.update(|m| m.counter += 1);
+    //             });
+    //         })
+    //         .scope(move |scope, task_cx| {
+    //             for _ in 0..5 {
+    //                 let counter = Arc::clone(&counter);
+    //                 scope.spawn(move || {
+    //                     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    //                     task_cx.dispatch(|app_cx| {
+    //                         app_cx.update(|m| m.counter += 1);
+    //                     });
+    //                 });
+    //             }
+    //         })
+    //         .spawn_async(|async_cx| async move {
+    //             async_cx.dispatch(|app_cx| {
+    //                 app_cx.update(|m| m.counter += 1);
+    //             });
+    //         });
 
-        #[cfg(feature = "rayon")]
-        let effect = effect
-            .spawn_rayon(|task_cx| {
-                task_cx.dispatch(|app_cx| {
-                    app_cx.update(|m| m.counter += 1);
-                });
-            })
-            .rayon_scope(|_scope, task_cx| {
-                task_cx.dispatch(|app_cx| {
-                    app_cx.update(|m| m.counter += 1);
-                });
-            });
+    //     #[cfg(feature = "rayon")]
+    //     let effect = effect
+    //         .spawn_rayon(|task_cx| {
+    //             task_cx.dispatch(|app_cx| {
+    //                 app_cx.update(|m| m.counter += 1);
+    //             });
+    //         })
+    //         .rayon_scope(|_scope, task_cx| {
+    //             task_cx.dispatch(|app_cx| {
+    //                 app_cx.update(|m| m.counter += 1);
+    //             });
+    //         });
 
-        effect.dispatch();
+    //     effect.dispatch();
 
-        // Wait for effects to complete
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    //     // Wait for effects to complete
+    //     std::thread::sleep(std::time::Duration::from_secs(1));
 
-        assert_eq!(shared_counter.load(std::sync::atomic::Ordering::SeqCst), 5);
+    //     assert_eq!(shared_counter.load(std::sync::atomic::Ordering::SeqCst), 5);
 
-        #[cfg(all(feature = "tokio", feature = "rayon"))]
-        assert_eq!(cx.query(|m| m.counter), 10);
+    //     #[cfg(all(feature = "tokio", feature = "rayon"))]
+    //     assert_eq!(cx.query(|m| m.counter), 10);
 
-        #[cfg(all(feature = "tokio", not(feature = "rayon")))]
-        assert_eq!(cx.query(|m| m.counter), 8);
-    }
+    //     #[cfg(all(feature = "tokio", not(feature = "rayon")))]
+    //     assert_eq!(cx.query(|m| m.counter), 8);
+    // }
 
     #[test]
     #[cfg(not(feature = "tokio"))]
@@ -1306,7 +1362,7 @@ mod tests {
             let start = Instant::now();
 
             for _ in 0..ITERATIONS {
-                cx.dispatch(|app_cx| {
+                cx.dispatch(|app_cx: AppContext<App, TestModel>| {
                     app_cx.query(|m| m.counter);
                 });
             }
@@ -1351,7 +1407,7 @@ mod tests {
         });
 
         let event = TestEvent { value: 42 };
-        cx.dispatch(move |cx| {
+        cx.dispatch(move |cx: AppContext<App, TestModel>| {
             cx.emit(event).unwrap();
         });
 
@@ -1361,5 +1417,26 @@ mod tests {
 
         cx.graceful_stop().unwrap();
         cx.wait_for_stop().unwrap();
+    }
+
+    #[test]
+    fn test_from_context() {
+        let model = TestModel { counter: 0 };
+        let cx = AppContext::builder(model).build();
+
+        #[derive(Debug)]
+        struct TestContext<M: Model> {
+            cx: AppContext<App, M>,
+        }
+
+        impl<M: Model> FromContext<M> for TestContext<M> {
+            type Context = App;
+
+            fn from_context(cx: AppContext<App, M>) -> Self {
+                Self { cx }
+            }
+        }
+
+        dbg!(cx.context::<TestContext<_>>());
     }
 }
