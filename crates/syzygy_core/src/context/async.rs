@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
-    spawn::{AsyncTaskQueue, SpawnAsync},
+    spawn::SpawnAsync,
     syzygy::Syzygy,
 };
 
@@ -13,10 +15,16 @@ pub struct AsyncContext {
     resources: Resources,
     dispatcher: Dispatcher,
     event_bus: EventBus,
-    async_task_queue: AsyncTaskQueue,
+    tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl Context for AsyncContext {}
+
+impl FromContext<AsyncContext> for AsyncContext {
+    fn from_context(cx: AsyncContext) -> Self {
+        cx
+    }
+}
 
 impl FromContext<Syzygy> for AsyncContext {
     fn from_context(cx: Syzygy) -> Self {
@@ -24,7 +32,7 @@ impl FromContext<Syzygy> for AsyncContext {
             dispatcher: cx.dispatcher.clone(),
             resources: cx.resources.clone(),
             event_bus: cx.event_bus.clone(),
-            async_task_queue: cx.async_task_queue.clone(),
+            tokio_rt: Arc::clone(&cx.tokio_rt),
         }
     }
 }
@@ -48,7 +56,7 @@ impl EmitEvent for AsyncContext {
 }
 
 impl SpawnAsync for AsyncContext {
-    fn async_task_queue(&self) -> &AsyncTaskQueue {
-        &self.async_task_queue
+    fn tokio_rt(&self) -> &tokio::runtime::Runtime {
+        &self.tokio_rt
     }
 }

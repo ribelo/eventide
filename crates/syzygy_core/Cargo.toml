@@ -18,7 +18,7 @@ tokio = { workspace = true, features = ["full"], optional = true }
 crossbeam-channel = { workspace = true }
 downcast-rs = { workspace = true }
 log = { workspace = true }
-parking_lot = { workspace = true, optional = true }
+parking_lot = { workspace = true }
 
 [lints.clippy]
 all = { level = "warn", priority = -2 }

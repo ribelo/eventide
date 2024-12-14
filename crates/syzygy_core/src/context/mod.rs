@@ -3,7 +3,7 @@ pub mod event;
 #[cfg(feature = "async")]
 pub mod r#async;
 
-pub trait Context: Sized + 'static {}
+pub trait Context: Sized + Clone + 'static {}
 
 pub trait FromContext<C>
 where

@@ -1,20 +1,18 @@
 use std::sync::Arc;
 
 use crate::{
-    context::{event::EventContext, thread::ThreadContext, Context, FromContext},
+    context::{event::EventContext, Context, FromContext},
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
-    spawn::{SpawnThread, TaskQueue},
+    spawn::SpawnThread,
 };
 
 #[cfg(feature = "async")]
-use crate::context::r#async::AsyncContext;
-#[cfg(feature = "async")]
-use crate::spawn::{AsyncTaskQueue, SpawnAsync};
+use crate::spawn::SpawnAsync;
 #[cfg(feature = "parallel")]
-use crate::spawn::{ParallelTaskQueue, SpawnParallel};
+use crate::spawn::SpawnParallel;
 
 #[derive(Debug, Default)]
 pub struct SyzygyBuilder {
@@ -91,11 +89,6 @@ impl SyzygyBuilder {
             resources,
             dispatcher: Dispatcher::default(),
             event_bus: EventBus::default(),
-            task_queue: TaskQueue::default(),
-            #[cfg(feature = "async")]
-            async_task_queue: AsyncTaskQueue::default(),
-            #[cfg(feature = "parallel")]
-            parallel_task_queue: ParallelTaskQueue::default(),
             #[cfg(feature = "async")]
             tokio_rt: Arc::new(self.tokio_rt.unwrap()),
             #[cfg(feature = "parallel")]
@@ -113,15 +106,10 @@ pub struct Syzygy {
     pub(super) resources: Resources,
     pub(crate) dispatcher: Dispatcher,
     pub(crate) event_bus: EventBus,
-    pub(crate) task_queue: TaskQueue,
     #[cfg(feature = "async")]
-    pub(crate) async_task_queue: AsyncTaskQueue,
+    pub(crate) tokio_rt: Arc<tokio::runtime::Runtime>,
     #[cfg(feature = "parallel")]
-    pub(crate) parallel_task_queue: ParallelTaskQueue,
-    #[cfg(feature = "async")]
-    tokio_rt: Arc<tokio::runtime::Runtime>,
-    #[cfg(feature = "parallel")]
-    rayon_pool: Arc<rayon::ThreadPool>,
+    pub(crate) rayon_pool: Arc<rayon::ThreadPool>,
 }
 
 impl Syzygy {
@@ -142,39 +130,9 @@ impl Syzygy {
         }
     }
 
-    pub(crate) fn handle_tasks(&self) {
-        let cx = ThreadContext::from_context(self.clone());
-        while let Some(task) = self.task_queue.pop() {
-            task.handle(cx.clone());
-        }
-    }
-
-    #[cfg(feature = "async")]
-    pub(crate) fn handle_async_tasks(&self) {
-        let cx = AsyncContext::from_context(self.clone());
-        while let Some(task) = self.async_task_queue.pop() {
-            let cx = cx.clone();
-            self.tokio_rt.spawn(task.handle(cx));
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    pub(crate) fn handle_parallel(&self) {
-        let cx = ThreadContext::from_context(self.clone());
-        while let Some(task) = self.parallel_task_queue.pop() {
-            let cx = cx.clone();
-            self.rayon_pool.spawn(move || task.handle(cx));
-        }
-    }
-
     pub fn handle_waiting(&self) {
         self.handle_effects();
         self.handle_events();
-        self.handle_tasks();
-        #[cfg(feature = "async")]
-        self.handle_async_tasks();
-        #[cfg(feature = "parallel")]
-        self.handle_parallel();
     }
 }
 
@@ -215,23 +173,19 @@ impl EmitEvent for Syzygy {
 impl Subscribe for Syzygy {}
 impl Unsubscribe for Syzygy {}
 
-impl SpawnThread for Syzygy {
-    fn task_queue(&self) -> &TaskQueue {
-        &self.task_queue
-    }
-}
+impl SpawnThread for Syzygy {}
 
 #[cfg(feature = "async")]
 impl SpawnAsync for Syzygy {
-    fn async_task_queue(&self) -> &AsyncTaskQueue {
-        &self.async_task_queue
+    fn tokio_rt(&self) -> &tokio::runtime::Runtime {
+        &self.tokio_rt
     }
 }
 
 #[cfg(feature = "parallel")]
 impl SpawnParallel for Syzygy {
-    fn parallel_task_queue(&self) -> &ParallelTaskQueue {
-        &self.parallel_task_queue
+    fn rayon_pool(&self) -> &rayon::ThreadPool {
+        &self.rayon_pool
     }
 }
 
@@ -654,7 +608,7 @@ mod tests {
 
         // Test spawning a task that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.task(move |_| async move {
+        let rx = syzygy.spawn_task(move |_| async move {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -670,7 +624,7 @@ mod tests {
         let tasks: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.task(move |_cx| async move {
+                syzygy.spawn_task(move |_cx| async move {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })

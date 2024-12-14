@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
-    spawn::{SpawnThread, TaskQueue},
+    spawn::SpawnThread,
     syzygy::Syzygy,
 };
 
 #[cfg(feature = "parallel")]
-use crate::spawn::{ParallelTaskQueue, SpawnParallel};
+use crate::spawn::SpawnParallel;
 
 use super::{Context, FromContext};
 
@@ -16,12 +18,17 @@ pub struct ThreadContext {
     resources: Resources,
     dispatcher: Dispatcher,
     event_bus: EventBus,
-    task_queue: TaskQueue,
     #[cfg(feature = "parallel")]
-    parallel_task_queue: ParallelTaskQueue,
+    rayon_pool: Arc<rayon::ThreadPool>,
 }
 
 impl Context for ThreadContext {}
+
+impl FromContext<ThreadContext> for ThreadContext {
+    fn from_context(cx: ThreadContext) -> Self {
+        cx
+    }
+}
 
 impl FromContext<Syzygy> for ThreadContext {
     fn from_context(cx: Syzygy) -> Self {
@@ -29,9 +36,8 @@ impl FromContext<Syzygy> for ThreadContext {
             dispatcher: cx.dispatcher.clone(),
             resources: cx.resources.clone(),
             event_bus: cx.event_bus.clone(),
-            task_queue: cx.task_queue.clone(),
             #[cfg(feature = "parallel")]
-            parallel_task_queue: cx.parallel_task_queue.clone(),
+            rayon_pool: Arc::clone(&cx.rayon_pool),
         }
     }
 }
@@ -54,15 +60,11 @@ impl EmitEvent for ThreadContext {
     }
 }
 
-impl SpawnThread for ThreadContext {
-    fn task_queue(&self) -> &TaskQueue {
-        &self.task_queue
-    }
-}
+impl SpawnThread for ThreadContext {}
 
 #[cfg(feature = "parallel")]
 impl SpawnParallel for ThreadContext {
-    fn parallel_task_queue(&self) -> &ParallelTaskQueue {
-        &self.parallel_task_queue
+    fn rayon_pool(&self) -> &rayon::ThreadPool {
+        &self.rayon_pool
     }
 }

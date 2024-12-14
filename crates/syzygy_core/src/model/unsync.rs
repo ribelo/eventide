@@ -9,10 +9,10 @@ use std::{
 use rustc_hash::FxHashMap;
 
 #[derive(Debug)]
-pub struct Model(RefCell<Box<dyn Any>>);
+pub struct Model(RefCell<Box<dyn Any + 'static>>);
 
 impl Deref for Model {
-    type Target = RefCell<Box<dyn Any>>;
+    type Target = RefCell<Box<dyn Any + 'static>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
