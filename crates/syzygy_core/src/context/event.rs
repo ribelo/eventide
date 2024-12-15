@@ -1,5 +1,5 @@
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, model::{ModelAccess, Models}, permission::{self, RoleHolder}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, model::{ModelAccess, Models}, role::{self, RoleHolder}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
 };
 
 use super::{Context, FromContext};
@@ -26,7 +26,7 @@ impl FromContext<Syzygy> for EventContext {
 }
 
 impl RoleHolder for EventContext {
-    type Role = permission::None;
+    type Role = role::AnyRole;
 }
 
 impl ModelAccess for EventContext {

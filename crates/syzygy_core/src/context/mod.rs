@@ -1,4 +1,4 @@
-use crate::{permission::{Role, RoleHolder}, syzygy::Syzygy};
+use crate::{role::{Role, RoleHolder}, syzygy::Syzygy};
 
 pub mod thread;
 pub mod event;

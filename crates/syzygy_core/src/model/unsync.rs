@@ -8,7 +8,7 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::{context::Context, permission::{ImpliedBy, Role, RoleGuarded, RoleHolder}};
+use crate::{context::Context, role::{ImpliedBy, Role, RoleGuarded, RoleHolder}};
 
 #[derive(Debug)]
 pub struct Model(RefCell<Box<dyn Any + 'static>>);

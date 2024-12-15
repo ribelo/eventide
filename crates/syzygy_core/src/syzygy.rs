@@ -5,7 +5,7 @@ use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
-    permission::{self, Role, RoleGuarded, RoleHolder},
+    role::{self, Role, RoleGuarded, RoleHolder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
     spawn::SpawnThread,
 };
@@ -195,7 +195,7 @@ impl SpawnParallel for Syzygy {
 }
 
 impl RoleHolder for Syzygy {
-    type Role = permission::Root;
+    type Role = role::Root;
 }
 
 // // impl<M: Model> EffectBuilder<M> {
@@ -376,7 +376,7 @@ mod tests {
     }
 
     impl RoleGuarded for TestModel {
-        type Role = permission::None;
+        type Role = role::AnyRole;
     }
 
     #[derive(Debug)]

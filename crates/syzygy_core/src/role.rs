@@ -15,9 +15,9 @@ pub struct Root;
 
 impl Role for Root {}
 
-#[derive(Clone, Copy, Default)]
-pub struct None;
-
-impl Role for None {}
-
 impl<P: Role> ImpliedBy<Root> for P {}
+
+#[derive(Clone, Copy, Default)]
+pub struct AnyRole;
+
+impl Role for AnyRole {}

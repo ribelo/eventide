@@ -1,7 +1,7 @@
 mod dispatch;
 mod event_bus;
 mod models;
-mod permission;
+mod role;
 mod resources;
 mod spawn;
 mod context;
@@ -65,20 +65,20 @@ pub fn derive_spawn_parallel(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(Role)]
 pub fn derive_role(input: TokenStream) -> TokenStream {
-    permission::role(input)
+    role::role(input)
 }
 
 #[proc_macro_derive(GrantRole, attributes(syzygy))]
 pub fn derive_grant_role(input: TokenStream) -> TokenStream {
-    permission::grant_role(input)
+    role::grant_role(input)
 }
 
 #[proc_macro_derive(GuardRole, attributes(syzygy))]
 pub fn derive_guard_role(input: TokenStream) -> TokenStream {
-    permission::guard_role(input)
+    role::guard_role(input)
 }
 
 #[proc_macro_derive(ImpliedBy, attributes(syzygy))]
 pub fn derive_implied_by(input: TokenStream) -> TokenStream {
-    permission::implied_by(input)
+    role::implied_by(input)
 }

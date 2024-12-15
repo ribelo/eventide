@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, permission::{self, RoleHolder}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, role::{self, RoleHolder}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
 };
 
 use super::{Context, FromContext};
@@ -15,7 +15,7 @@ pub struct AsyncContext {
 }
 
 impl RoleHolder for AsyncContext {
-    type Role = permission::Root;
+    type Role = role::Root;
 }
 
 impl Context for AsyncContext {}

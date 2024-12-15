@@ -9,6 +9,7 @@ pub fn role(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl Role for #name {}
+        impl ImpliedBy<#name> for ::syzygy_core::role::AnyRole {}
     };
 
     TokenStream::from(expanded)
