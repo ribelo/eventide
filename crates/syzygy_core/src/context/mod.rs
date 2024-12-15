@@ -1,11 +1,11 @@
-use crate::{permission::{Permission, PermissionHolder}, syzygy::Syzygy};
+use crate::{permission::{Role, RoleHolder}, syzygy::Syzygy};
 
 pub mod thread;
 pub mod event;
 #[cfg(feature = "async")]
 pub mod r#async;
 
-pub trait Context: PermissionHolder + Sized + Clone + 'static {}
+pub trait Context: RoleHolder + Sized + Clone + 'static {}
 
 pub trait FromContext<C>: Context
 where

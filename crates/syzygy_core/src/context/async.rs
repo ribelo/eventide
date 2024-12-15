@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, permission::{self, PermissionHolder}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, permission::{self, RoleHolder}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
 };
 
 use super::{Context, FromContext};
@@ -14,8 +14,8 @@ pub struct AsyncContext {
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
-impl PermissionHolder for AsyncContext {
-    type Granted = permission::Root;
+impl RoleHolder for AsyncContext {
+    type Role = permission::Root;
 }
 
 impl Context for AsyncContext {}

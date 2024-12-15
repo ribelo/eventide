@@ -5,7 +5,7 @@ use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
-    permission::{self, PermissionHolder, Permission, PermissionGuarded},
+    permission::{self, Role, RoleGuarded, RoleHolder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
     spawn::SpawnThread,
 };
@@ -29,7 +29,7 @@ impl SyzygyBuilder {
     #[must_use]
     pub fn model<M>(self, model: M) -> Self
     where
-        M: PermissionGuarded + 'static,
+        M: RoleGuarded + 'static,
     {
         Self {
             models: self.models.insert(model),
@@ -194,8 +194,8 @@ impl SpawnParallel for Syzygy {
     }
 }
 
-impl PermissionHolder for Syzygy {
-    type Granted = permission::Root;
+impl RoleHolder for Syzygy {
+    type Role = permission::Root;
 }
 
 // // impl<M: Model> EffectBuilder<M> {
@@ -367,7 +367,6 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 #[allow(clippy::cast_precision_loss)]
 #[cfg(test)]
 mod tests {
-    use crate::permission::{self, ImpliedBy};
 
     use super::*;
 
@@ -376,8 +375,8 @@ mod tests {
         counter: i32,
     }
 
-    impl PermissionGuarded for TestModel {
-        type Needed = permission::None;
+    impl RoleGuarded for TestModel {
+        type Role = permission::None;
     }
 
     #[derive(Debug)]
@@ -388,10 +387,10 @@ mod tests {
     #[derive(Debug, Clone, Copy, Default)]
     pub struct SomePermission;
 
-    impl Permission for SomePermission {}
+    impl Role for SomePermission {}
 
-    impl PermissionGuarded for SecuredModel {
-        type Needed = SomePermission;
+    impl RoleGuarded for SecuredModel {
+        type Role = SomePermission;
     }
 
     #[test]

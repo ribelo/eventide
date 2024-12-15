@@ -1,23 +1,23 @@
-pub trait Permission: Clone + Copy + Default + 'static {}
+pub trait Role: Clone + Copy + 'static {}
 
-pub trait PermissionHolder {
-    type Granted: Permission;
+pub trait RoleHolder {
+    type Role: Role;
 }
 
-pub trait PermissionGuarded {
-    type Needed: Permission;
+pub trait RoleGuarded {
+    type Role: Role;
 }
 
-pub trait ImpliedBy<P: Permission> {}
+pub trait ImpliedBy<P: Role> {}
 
 #[derive(Clone, Copy, Default)]
 pub struct Root;
 
-impl Permission for Root {}
+impl Role for Root {}
 
 #[derive(Clone, Copy, Default)]
 pub struct None;
 
-impl Permission for None {}
+impl Role for None {}
 
-impl<P: Permission> ImpliedBy<Root> for P {}
+impl<P: Role> ImpliedBy<Root> for P {}

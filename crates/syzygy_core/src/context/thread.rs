@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
-    permission::{self, PermissionHolder},
+    permission::{self, RoleHolder},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
     syzygy::Syzygy,
@@ -23,8 +23,8 @@ pub struct ThreadContext {
     rayon_pool: Arc<rayon::ThreadPool>,
 }
 
-impl PermissionHolder for ThreadContext {
-    type Granted = permission::Root;
+impl RoleHolder for ThreadContext {
+    type Role = permission::Root;
 }
 
 impl Context for ThreadContext {}
