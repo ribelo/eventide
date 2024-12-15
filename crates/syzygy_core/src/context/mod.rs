@@ -1,9 +1,9 @@
-use crate::{role::{Role, RoleHolder}, syzygy::Syzygy};
+use crate::{role::RoleHolder, syzygy::Syzygy};
 
-pub mod thread;
-pub mod event;
 #[cfg(feature = "async")]
 pub mod r#async;
+pub mod event;
+pub mod thread;
 
 pub trait Context: RoleHolder + Sized + Clone + 'static {}
 

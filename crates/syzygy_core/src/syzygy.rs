@@ -5,8 +5,8 @@ use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
-    role::{self, Role, RoleGuarded, RoleHolder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
+    role::{self,  RoleGuarded, RoleHolder},
     spawn::SpawnThread,
 };
 
@@ -124,9 +124,7 @@ impl Syzygy {
         let cx = EventContext::from_context(self.clone());
         while let Some((event_type, event)) = self.event_bus.pop() {
             if let Err(err) = self.event_bus.handle(&cx, &event_type, event) {
-                if log::log_enabled!(log::Level::Warn) {
-                    log::warn!("{}", err);
-                }
+                log::warn!("{}", err);
             }
         }
     }
@@ -368,6 +366,8 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 #[cfg(test)]
 mod tests {
 
+    use role::Role;
+
     use super::*;
 
     #[derive(Debug)]
@@ -414,9 +414,7 @@ mod tests {
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default()
-            .model(model)
-            .build();
+        let syzygy = SyzygyBuilder::default().model(model).build();
 
         // Test initial state
         let counter = syzygy.model::<TestModel>().counter;
@@ -460,8 +458,12 @@ mod tests {
     #[test]
     fn test_resources() {
         let model = TestModel { counter: 0 };
-        let test_resource = TestResource { name: "test_str".to_string() };
-        let secured_resource = SecuredResource { name: "test_str".to_string() };
+        let test_resource = TestResource {
+            name: "test_str".to_string(),
+        };
+        let secured_resource = SecuredResource {
+            name: "test_str".to_string(),
+        };
         let syzygy = SyzygyBuilder::default()
             .model(model)
             .resource(test_resource)
@@ -1119,7 +1121,7 @@ mod tests {
     //     handle.join().unwrap();
     //     assert!(!cx.is_running());
     // }
-    // #[ignore]
+    #[ignore]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;

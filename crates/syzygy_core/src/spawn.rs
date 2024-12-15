@@ -2,7 +2,7 @@ use std::future::Future;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-use crate::{context::{thread::ThreadContext, Context, FromContext}, syzygy::Syzygy};
+use crate::{context::{thread::ThreadContext, FromContext}, syzygy::Syzygy};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]

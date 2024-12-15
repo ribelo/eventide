@@ -1,14 +1,13 @@
 use std::{
     any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
-    fmt,
     ops::Deref,
     rc::Rc,
 };
 
 use rustc_hash::FxHashMap;
 
-use crate::{context::Context, role::{ImpliedBy, Role, RoleGuarded, RoleHolder}};
+use crate::{context::Context, role::{ImpliedBy, RoleGuarded, RoleHolder}};
 
 #[derive(Debug)]
 pub struct Model(RefCell<Box<dyn Any + 'static>>);
