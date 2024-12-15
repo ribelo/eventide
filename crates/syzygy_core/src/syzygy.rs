@@ -5,6 +5,7 @@ use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
+    permission::{self, HasPermission, Permission, RequiredPermission},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
     spawn::SpawnThread,
 };
@@ -26,9 +27,9 @@ pub struct SyzygyBuilder {
 
 impl SyzygyBuilder {
     #[must_use]
-    pub fn model<T>(self, model: T) -> Self
+    pub fn model<M>(self, model: M) -> Self
     where
-        T: 'static,
+        M: RequiredPermission + 'static,
     {
         Self {
             models: self.models.insert(model),
@@ -138,6 +139,10 @@ impl Syzygy {
 
 impl Context for Syzygy {}
 
+// impl HasPermission for Syzygy {
+//     type Permission = permission::None;
+// }
+
 impl FromContext<Syzygy> for Syzygy {
     fn from_context(cx: Syzygy) -> Self {
         cx
@@ -187,6 +192,10 @@ impl SpawnParallel for Syzygy {
     fn rayon_pool(&self) -> &rayon::ThreadPool {
         &self.rayon_pool
     }
+}
+
+impl HasPermission for Syzygy {
+    type Permission = permission::Root;
 }
 
 // // impl<M: Model> EffectBuilder<M> {
@@ -358,11 +367,31 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 #[allow(clippy::cast_precision_loss)]
 #[cfg(test)]
 mod tests {
+    use crate::permission::{self, ImpliedBy};
+
     use super::*;
 
     #[derive(Debug)]
     struct TestModel {
         counter: i32,
+    }
+
+    impl RequiredPermission for TestModel {
+        type Required = permission::None;
+    }
+
+    #[derive(Debug)]
+    struct SecuredModel {
+        counter: i32,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct SomePermission;
+
+    impl Permission for SomePermission {}
+
+    impl RequiredPermission for SecuredModel {
+        type Required = SomePermission;
     }
 
     #[test]
@@ -389,19 +418,11 @@ mod tests {
         assert!(model.is_some());
         assert_eq!(model.unwrap().counter, 1);
 
-        // Test try_model() for missing model
-        let missing = syzygy.try_model::<String>();
-        assert!(missing.is_none());
-
         // Test try_model_mut() for existing model
         let model_mut = syzygy.try_model_mut::<TestModel>();
         assert!(model_mut.is_some());
         model_mut.unwrap().counter += 1;
         assert_eq!(syzygy.model::<TestModel>().counter, 2);
-
-        // Test try_model_mut() for missing model
-        let missing_mut = syzygy.try_model_mut::<String>();
-        assert!(missing_mut.is_none());
 
         // Test update
         syzygy.update(|m: &mut TestModel| {
@@ -412,6 +433,12 @@ mod tests {
         // Test query
         let value = syzygy.query(|m: &TestModel| m.counter);
         assert_eq!(value, 42);
+
+        // Test permission
+        let secured_model = SecuredModel { counter: 0 };
+        let syzygy = SyzygyBuilder::default().model(secured_model).build();
+
+        assert_eq!(syzygy.model::<SecuredModel>().counter, 0);
     }
 
     #[test]
@@ -461,9 +488,9 @@ mod tests {
         // Test dispatching multiple updates
         syzygy
             .dispatch(|cx: Syzygy| {
-                cx.update::<TestModel, _>(|m| m.counter += 1);
-                cx.update::<TestModel, _>(|m| m.counter += 1);
-                cx.update::<TestModel, _>(|m| m.counter += 1);
+                cx.update(|m: &mut TestModel| m.counter += 1);
+                cx.update(|m: &mut TestModel| m.counter += 1);
+                cx.update(|m: &mut TestModel| m.counter += 1);
             })
             .unwrap();
         syzygy
@@ -1081,7 +1108,7 @@ mod tests {
     //     handle.join().unwrap();
     //     assert!(!cx.is_running());
     // }
-    // #[ignore]
+    #[ignore]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;

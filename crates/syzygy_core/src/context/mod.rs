@@ -1,3 +1,5 @@
+use crate::permission::{HasPermission, Permission};
+
 pub mod thread;
 pub mod event;
 #[cfg(feature = "async")]

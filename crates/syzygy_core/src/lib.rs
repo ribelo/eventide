@@ -6,6 +6,7 @@ pub mod model;
 pub mod resource;
 pub mod spawn;
 pub mod syzygy;
+pub mod permission;
 
 pub mod prelude {
     pub use crate::event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe};
