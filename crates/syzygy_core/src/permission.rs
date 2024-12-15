@@ -1,11 +1,11 @@
 pub trait Permission: Clone + Copy + Default + 'static {}
 
-pub trait HasPermission {
-    type Permission: Permission;
+pub trait PermissionHolder {
+    type Granted: Permission;
 }
 
-pub trait RequiredPermission {
-    type Required: Permission;
+pub trait PermissionGuarded {
+    type Needed: Permission;
 }
 
 pub trait ImpliedBy<P: Permission> {}

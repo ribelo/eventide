@@ -1,5 +1,5 @@
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, model::{ModelAccess, Models}, permission::{self, HasPermission}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, model::{ModelAccess, Models}, permission::{self, PermissionHolder}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
 };
 
 use super::{Context, FromContext};
@@ -25,8 +25,8 @@ impl FromContext<Syzygy> for EventContext {
     }
 }
 
-impl HasPermission for EventContext {
-    type Permission = permission::None;
+impl PermissionHolder for EventContext {
+    type Granted = permission::None;
 }
 
 impl ModelAccess for EventContext {

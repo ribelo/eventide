@@ -8,7 +8,7 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::permission::{ImpliedBy, HasPermission, Permission, RequiredPermission};
+use crate::permission::{ImpliedBy, PermissionHolder, Permission, PermissionGuarded};
 
 #[derive(Debug)]
 pub struct Model(RefCell<Box<dyn Any + 'static>>);
@@ -27,7 +27,7 @@ impl ModelsBuilder {
     #[must_use]
     pub fn insert<M>(mut self, model: M) -> Self
     where
-        M: RequiredPermission + 'static,
+        M: PermissionGuarded + 'static,
     {
         self.0.insert(TypeId::of::<M>(), Box::new(model));
         self
@@ -91,25 +91,25 @@ pub trait ModelAccess {
     fn models(&self) -> &Models;
     fn model<M>(&self) -> Ref<M>
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
     {
         self.models().get::<M>().unwrap()
     }
     fn try_model<M>(&self) -> Option<Ref<M>>
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
     {
         self.models().get::<M>()
     }
     fn query<M, F, R>(&self, f: F) -> R
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
         F: FnOnce(&M) -> R,
         R: 'static,
     {
@@ -120,25 +120,25 @@ pub trait ModelAccess {
 pub trait ModelMut: ModelAccess {
     fn model_mut<M>(&self) -> RefMut<M>
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
     {
         self.models().get_mut::<M>().unwrap()
     }
     fn try_model_mut<M>(&self) -> Option<RefMut<M>>
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
     {
         self.models().get_mut::<M>()
     }
     fn update<M, F>(&self, mut f: F)
     where
-        Self: HasPermission,
-        M: RequiredPermission + 'static,
-        M::Required: ImpliedBy<<Self as HasPermission>::Permission>,
+        Self: PermissionHolder,
+        M: PermissionGuarded + 'static,
+        M::Needed: ImpliedBy<<Self as PermissionHolder>::Granted>,
         F: FnMut(&mut M),
     {
         f(&mut self.model_mut());

@@ -5,7 +5,7 @@ use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
-    permission::{self, HasPermission, Permission, RequiredPermission},
+    permission::{self, PermissionHolder, Permission, PermissionGuarded},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
     spawn::SpawnThread,
 };
@@ -29,7 +29,7 @@ impl SyzygyBuilder {
     #[must_use]
     pub fn model<M>(self, model: M) -> Self
     where
-        M: RequiredPermission + 'static,
+        M: PermissionGuarded + 'static,
     {
         Self {
             models: self.models.insert(model),
@@ -194,8 +194,8 @@ impl SpawnParallel for Syzygy {
     }
 }
 
-impl HasPermission for Syzygy {
-    type Permission = permission::Root;
+impl PermissionHolder for Syzygy {
+    type Granted = permission::Root;
 }
 
 // // impl<M: Model> EffectBuilder<M> {
@@ -376,8 +376,8 @@ mod tests {
         counter: i32,
     }
 
-    impl RequiredPermission for TestModel {
-        type Required = permission::None;
+    impl PermissionGuarded for TestModel {
+        type Needed = permission::None;
     }
 
     #[derive(Debug)]
@@ -390,8 +390,8 @@ mod tests {
 
     impl Permission for SomePermission {}
 
-    impl RequiredPermission for SecuredModel {
-        type Required = SomePermission;
+    impl PermissionGuarded for SecuredModel {
+        type Needed = SomePermission;
     }
 
     #[test]

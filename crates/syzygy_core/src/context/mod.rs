@@ -1,11 +1,11 @@
-use crate::permission::{HasPermission, Permission};
+use crate::permission::{PermissionHolder, Permission};
 
 pub mod thread;
 pub mod event;
 #[cfg(feature = "async")]
 pub mod r#async;
 
-pub trait Context: Sized + Clone + 'static {}
+pub trait Context: PermissionHolder + Sized + Clone + 'static {}
 
 pub trait FromContext<C>
 where
