@@ -44,7 +44,7 @@ impl SyzygyBuilder {
     #[must_use]
     pub fn resource<T>(self, resource: T) -> Self
     where
-        T: Clone + Send + Sync + 'static,
+        T: RoleGuarded + Clone + Send + Sync + 'static,
     {
         Self {
             models: self.models,
@@ -379,6 +379,15 @@ mod tests {
         type Role = role::AnyRole;
     }
 
+    #[derive(Debug, Clone)]
+    struct TestResource {
+        name: String,
+    }
+
+    impl RoleGuarded for TestResource {
+        type Role = role::AnyRole;
+    }
+
     #[derive(Debug)]
     struct SecuredModel {
         counter: i32,
@@ -393,12 +402,20 @@ mod tests {
         type Role = SomePermission;
     }
 
+    #[derive(Debug, Clone)]
+    struct SecuredResource {
+        name: String,
+    }
+
+    impl RoleGuarded for SecuredResource {
+        type Role = SomePermission;
+    }
+
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
         let syzygy = SyzygyBuilder::default()
             .model(model)
-            .resource("test_resource".to_string())
             .build();
 
         // Test initial state
@@ -443,33 +460,28 @@ mod tests {
     #[test]
     fn test_resources() {
         let model = TestModel { counter: 0 };
+        let test_resource = TestResource { name: "test_str".to_string() };
+        let secured_resource = SecuredResource { name: "test_str".to_string() };
         let syzygy = SyzygyBuilder::default()
             .model(model)
-            .resource("test_str".to_string())
-            .resource(42i32)
-            .resource(std::f64::consts::PI)
-            .resource(vec![1, 2, 3])
+            .resource(test_resource)
+            .resource(secured_resource)
             .build();
 
-        // Test accessing existing resources
-        assert_eq!(syzygy.resource::<String>(), "test_str");
-        assert_eq!(syzygy.resource::<i32>(), 42);
-        let pi = syzygy.resource::<f64>();
-        assert!((pi - std::f64::consts::PI).abs() < f64::EPSILON);
-        assert_eq!(syzygy.resource::<Vec<i32>>(), vec![1, 2, 3]);
+        // Test accessing existing TestResource
+        assert_eq!(syzygy.resource::<TestResource>().name, "test_str");
+
+        let secured_resource = syzygy.resource::<SecuredResource>();
+        assert_eq!(secured_resource.name, "test_str");
 
         // Test try_resource for existing resources
-        assert_eq!(syzygy.try_resource::<String>().unwrap(), "test_str");
-        assert_eq!(syzygy.try_resource::<i32>().unwrap(), 42);
-        let pi = syzygy.try_resource::<f64>().unwrap();
-        assert!((pi - std::f64::consts::PI).abs() < f64::EPSILON);
-        assert_eq!(syzygy.try_resource::<Vec<i32>>().unwrap(), vec![1, 2, 3]);
+        let test_resource = syzygy.try_resource::<TestResource>();
+        assert!(test_resource.is_some());
+        assert_eq!(test_resource.unwrap().name, "test_str");
 
-        // Test accessing missing resources
-        assert!(syzygy.try_resource::<bool>().is_none());
-        assert!(syzygy.try_resource::<char>().is_none());
-        assert!(syzygy.try_resource::<usize>().is_none());
-        assert!(syzygy.try_resource::<Vec<String>>().is_none());
+        let secured_resource = syzygy.try_resource::<SecuredResource>();
+        assert!(secured_resource.is_some());
+        assert_eq!(secured_resource.unwrap().name, "test_str");
     }
 
     #[test]
@@ -1107,7 +1119,7 @@ mod tests {
     //     handle.join().unwrap();
     //     assert!(!cx.is_running());
     // }
-    #[ignore]
+    // #[ignore]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;

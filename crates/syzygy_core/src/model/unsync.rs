@@ -91,7 +91,6 @@ pub trait ModelAccess: Context {
     fn models(&self) -> &Models;
     fn model<M>(&self) -> Ref<M>
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
     {
@@ -99,7 +98,6 @@ pub trait ModelAccess: Context {
     }
     fn try_model<M>(&self) -> Option<Ref<M>>
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
     {
@@ -107,7 +105,6 @@ pub trait ModelAccess: Context {
     }
     fn query<M, F, R>(&self, f: F) -> R
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
         F: FnOnce(&M) -> R,
@@ -120,7 +117,6 @@ pub trait ModelAccess: Context {
 pub trait ModelMut: ModelAccess {
     fn model_mut<M>(&self) -> RefMut<M>
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
     {
@@ -128,7 +124,6 @@ pub trait ModelMut: ModelAccess {
     }
     fn try_model_mut<M>(&self) -> Option<RefMut<M>>
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
     {
@@ -136,7 +131,6 @@ pub trait ModelMut: ModelAccess {
     }
     fn update<M, F>(&self, mut f: F)
     where
-        Self: RoleHolder,
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
         F: FnMut(&mut M),
