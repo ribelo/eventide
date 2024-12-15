@@ -8,7 +8,7 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::permission::{ImpliedBy, PermissionHolder, Permission, PermissionGuarded};
+use crate::{context::Context, permission::{ImpliedBy, Permission, PermissionGuarded, PermissionHolder}};
 
 #[derive(Debug)]
 pub struct Model(RefCell<Box<dyn Any + 'static>>);
@@ -87,7 +87,7 @@ impl Models {
     }
 }
 
-pub trait ModelAccess {
+pub trait ModelAccess: Context {
     fn models(&self) -> &Models;
     fn model<M>(&self) -> Ref<M>
     where

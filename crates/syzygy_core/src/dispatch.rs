@@ -40,10 +40,11 @@ impl Default for Dispatcher {
 }
 
 impl Dispatcher {
-    pub fn dispatch<E, T>(&self, effect: E) -> Result<(), DispatchError>
+    pub fn dispatch<C, E, T>(&self, effect: E) -> Result<(), DispatchError>
     where
+        C: FromContext<Syzygy>,
         E: FnOnce(T) + Send + Sync + 'static,
-        T: FromContext<Syzygy>,
+        T: FromContext<C> + FromContext<Syzygy>,
     {
         let effect = Box::new(|syzygy: Syzygy| effect(T::from_context(syzygy)));
         self.tx

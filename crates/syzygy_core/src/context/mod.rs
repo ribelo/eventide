@@ -1,4 +1,4 @@
-use crate::permission::{PermissionHolder, Permission};
+use crate::{permission::{Permission, PermissionHolder}, syzygy::Syzygy};
 
 pub mod thread;
 pub mod event;
@@ -7,9 +7,9 @@ pub mod r#async;
 
 pub trait Context: PermissionHolder + Sized + Clone + 'static {}
 
-pub trait FromContext<C>
+pub trait FromContext<C>: Context
 where
-    C: Context,
+    C: FromContext<Syzygy>,
 {
     fn from_context(cx: C) -> Self;
 }

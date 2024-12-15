@@ -2,13 +2,13 @@ use std::future::Future;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-use crate::context::{thread::ThreadContext, Context, FromContext};
+use crate::{context::{thread::ThreadContext, Context, FromContext}, syzygy::Syzygy};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: Context
+pub trait SpawnThread: FromContext<Syzygy>
 where
     ThreadContext: FromContext<Self>,
 {
@@ -40,7 +40,7 @@ pub enum AsyncTaskError {
 }
 
 #[cfg(feature = "async")]
-pub trait SpawnAsync: Context
+pub trait SpawnAsync: FromContext<Syzygy>
 where
     AsyncContext: FromContext<Self>,
 {
@@ -64,7 +64,7 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel: Context
+pub trait SpawnParallel: FromContext<Syzygy>
 where
     ThreadContext: FromContext<Self>,
 {
