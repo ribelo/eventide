@@ -1,5 +1,3 @@
-#[cfg(feature = "role")]
-use crate::role::{AnyRole, RoleHolder};
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
@@ -8,20 +6,20 @@ use crate::{
     syzygy::Syzygy,
 };
 
-use super::{Context, FromContext};
+use super::{Context, BorrowFromContext};
 
 #[derive(Debug, Clone)]
-pub struct EventContext {
+pub struct EventContext<'a> {
     models: Models,
     resources: Resources,
-    dispatcher: Dispatcher,
+    dispatcher: Dispatcher<'a>,
     emiter: EventBus,
 }
 
-impl Context for EventContext {}
+impl<'a> Context for EventContext<'a> {}
 
-impl FromContext<Syzygy> for EventContext {
-    fn from_context(cx: Syzygy) -> Self {
+impl<'a> BorrowFromContext<'a, Syzygy> for EventContext<'a> {
+    fn from_context(cx: &'a Syzygy) -> Self {
         Self {
             models: cx.models.clone(),
             resources: cx.resources.clone(),
@@ -31,30 +29,25 @@ impl FromContext<Syzygy> for EventContext {
     }
 }
 
-#[cfg(feature = "role")]
-impl RoleHolder for EventContext {
-    type Role = AnyRole;
-}
-
-impl ModelAccess for EventContext {
+impl<'a> ModelAccess for EventContext<'a> {
     fn models(&self) -> &Models {
         &self.models
     }
 }
 
-impl ResourceAccess for EventContext {
+impl<'a> ResourceAccess for EventContext<'a> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl DispatchEffect for EventContext {
-    fn dispatcher(&self) -> &Dispatcher {
+impl<'a> DispatchEffect<'a> for EventContext<'a> {
+    fn dispatcher(&self) -> &Dispatcher<'a> {
         &self.dispatcher
     }
 }
 
-impl EmitEvent for EventContext {
+impl<'a> EmitEvent for EventContext<'a> {
     fn event_bus(&self) -> &EventBus {
         &self.emiter
     }

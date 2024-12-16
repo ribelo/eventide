@@ -3,18 +3,14 @@ pub mod context;
 pub mod dispatch;
 pub mod event_bus;
 pub mod model;
-#[cfg(feature = "role")]
-pub mod role;
 pub mod resource;
 pub mod spawn;
 pub mod syzygy;
 
 pub mod prelude {
-    pub use crate::context::{Context, FromContext};
+    pub use crate::context::{Context, BorrowFromContext};
     pub use crate::event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe};
-    pub use crate::model::{ModelAccess, ModelMut, Models};
-    #[cfg(feature = "role")]
-    pub use crate::role::{ImpliedBy, Role, RoleGuarded, RoleHolder, AnyRole, Root};
+    pub use crate::model::{ModelAccess, ModelModify, Models, Model, ModelMut};
     pub use crate::resource::{ResourceAccess, Resources};
     pub use crate::spawn::SpawnThread;
     #[cfg(feature = "async")]

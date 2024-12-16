@@ -7,14 +7,12 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::context::Context;
-#[cfg(feature = "role")]
-use crate::role::{ImpliedBy, RoleGuarded, RoleHolder};
+use crate::context::{Context, BorrowFromContext};
 
 #[derive(Debug)]
-pub struct Model(RefCell<Box<dyn Any + 'static>>);
+pub struct ModelBox(Rc<RefCell<Box<dyn Any + 'static>>>);
 
-impl Deref for Model {
+impl Deref for ModelBox {
     type Target = RefCell<Box<dyn Any + 'static>>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -26,18 +24,9 @@ pub struct ModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
 
 impl ModelsBuilder {
     #[must_use]
-    #[cfg(not(feature = "role"))]
     pub fn insert<M>(mut self, model: M) -> Self
     where
         M: 'static,
-    {
-        self.0.insert(TypeId::of::<M>(), Box::new(model));
-        self
-    }
-    #[cfg(feature = "role")]
-    pub fn insert<M>(mut self, model: M) -> Self
-    where
-        M: RoleGuarded + 'static,
     {
         self.0.insert(TypeId::of::<M>(), Box::new(model));
         self
@@ -47,7 +36,7 @@ impl ModelsBuilder {
         let models = self
             .0
             .into_iter()
-            .map(|(id, model)| (id, Model(RefCell::new(model))))
+            .map(|(id, model)| (id, ModelBox(Rc::new(RefCell::new(model)))))
             .collect();
 
         Models(Rc::new(models))
@@ -55,10 +44,10 @@ impl ModelsBuilder {
 }
 
 #[derive(Debug, Clone)]
-pub struct Models(Rc<FxHashMap<TypeId, Model>>);
+pub struct Models(Rc<FxHashMap<TypeId, ModelBox>>);
 
 impl Deref for Models {
-    type Target = Rc<FxHashMap<TypeId, Model>>;
+    type Target = Rc<FxHashMap<TypeId, ModelBox>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -97,35 +86,6 @@ impl Models {
     }
 }
 
-#[cfg(feature = "role")]
-pub trait ModelAccess: Context + RoleHolder {
-    fn models(&self) -> &Models;
-    fn model<M>(&self) -> Ref<M>
-    where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
-    {
-        self.models().get::<M>().unwrap()
-    }
-    fn try_model<M>(&self) -> Option<Ref<M>>
-    where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
-    {
-        self.models().get::<M>()
-    }
-    fn query<M, F, R>(&self, f: F) -> R
-    where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
-        F: FnOnce(&M) -> R,
-        R: 'static,
-    {
-        f(&self.model())
-    }
-}
-
-#[cfg(not(feature = "role"))]
 pub trait ModelAccess: Context {
     fn models(&self) -> &Models;
     fn model<M>(&self) -> Ref<M>
@@ -150,51 +110,62 @@ pub trait ModelAccess: Context {
     }
 }
 
-#[cfg(feature = "role")]
-pub trait ModelMut: ModelAccess {
+pub trait ModelModify: ModelAccess {
     fn model_mut<M>(&self) -> RefMut<M>
     where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
+        M: 'static,
     {
         self.models().get_mut::<M>().unwrap()
     }
     fn try_model_mut<M>(&self) -> Option<RefMut<M>>
     where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
+        M: 'static,
     {
         self.models().get_mut::<M>()
     }
     fn update<M, F>(&self, mut f: F)
     where
-        M: RoleGuarded + 'static,
-        M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
+        M: 'static,
         F: FnMut(&mut M),
     {
         f(&mut self.model_mut());
     }
 }
 
-#[cfg(not(feature = "role"))]
-pub trait ModelMut: ModelAccess {
-    fn model_mut<M>(&self) -> RefMut<M>
-    where
-        M: 'static,
-    {
-        self.models().get_mut::<M>().unwrap()
+pub struct Model<'a, T>(pub Ref<'a, T>);
+
+impl<'a, T> Deref for Model<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
-    fn try_model_mut<M>(&self) -> Option<RefMut<M>>
-    where
-        M: 'static,
-    {
-        self.models().get_mut::<M>()
+}
+
+impl<'a, C, T> BorrowFromContext<'a, C> for Model<'a, T>
+where
+    C: Context + ModelAccess,
+    T: 'static,
+{
+    fn from_context(context: &'a C) -> Self {
+        Self(context.model::<T>())
     }
-    fn update<M, F>(&self, mut f: F)
-    where
-        M: 'static,
-        F: FnMut(&mut M),
-    {
-        f(&mut self.model_mut());
+}
+
+pub struct ModelMut<'a, T>(pub RefMut<'a, T>);
+
+impl<'a, T> Deref for ModelMut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a, C, T> BorrowFromContext<'a, C> for ModelMut<'a, T>
+where
+    C: Context + ModelModify,
+    T: 'static,
+{
+    fn from_context(context: &'a C) -> Self {
+        Self(context.model_mut::<T>())
     }
 }

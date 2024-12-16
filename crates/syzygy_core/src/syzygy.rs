@@ -2,16 +2,14 @@
 use std::sync::Arc;
 
 use crate::{
-    context::{event::EventContext, Context, FromContext},
+    context::{event::EventContext, BorrowFromContext, Context, FromContext},
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
-    model::{ModelAccess, ModelMut, Models, ModelsBuilder},
+    model::{ModelAccess, ModelModify, Models, ModelsBuilder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
     spawn::SpawnThread,
 };
 
-#[cfg(feature = "role")]
-use crate::role::{self, RoleGuarded, RoleHolder};
 #[cfg(feature = "async")]
 use crate::spawn::SpawnAsync;
 #[cfg(feature = "parallel")]
@@ -29,21 +27,6 @@ pub struct SyzygyBuilder {
 
 impl SyzygyBuilder {
     #[must_use]
-    #[cfg(feature = "role")]
-    pub fn model<M>(self, model: M) -> Self
-    where
-        M: RoleGuarded + 'static,
-    {
-        Self {
-            models: self.models.insert(model),
-            resources: self.resources,
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-    #[cfg(not(feature = "role"))]
     pub fn model<M>(self, model: M) -> Self
     where
         M: 'static,
@@ -58,22 +41,6 @@ impl SyzygyBuilder {
         }
     }
 
-    #[cfg(feature = "role")]
-    #[must_use]
-    pub fn resource<T>(self, resource: T) -> Self
-    where
-        T: RoleGuarded + Clone + Send + Sync + 'static,
-    {
-        Self {
-            models: self.models,
-            resources: self.resources.insert(resource),
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-    #[cfg(not(feature = "role"))]
     pub fn resource<T>(self, resource: T) -> Self
     where
         T: Clone + Send + Sync + 'static,
@@ -148,12 +115,12 @@ pub struct Syzygy {
 impl Syzygy {
     pub(crate) fn handle_effects(&self) {
         while let Some(effect) = self.dispatcher.pop() {
-            effect.handle(self.clone());
+            effect.handle(self);
         }
     }
 
     pub(crate) fn handle_events(&self) {
-        let cx = EventContext::from_context(self.clone());
+        let cx = EventContext::from_context(self);
         while let Some((event_type, event)) = self.event_bus.pop() {
             if let Err(err) = self.event_bus.handle(&cx, &event_type, event) {
                 log::warn!("{}", err);
@@ -172,9 +139,15 @@ impl Context for Syzygy {}
 #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
 impl<C: Context> FromContext<C> for Syzygy
 where
-    C: Context + ModelAccess + ModelMut + ResourceAccess + DispatchEffect + EmitEvent + SpawnThread,
+    C: Context
+        + ModelAccess
+        + ModelModify
+        + ResourceAccess
+        + DispatchEffect
+        + EmitEvent
+        + SpawnThread,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
             models: <C as ModelAccess>::models(&cx).clone(),
             resources: <C as ResourceAccess>::resources(&cx).clone(),
@@ -189,20 +162,20 @@ impl<C: Context> FromContext<C> for Syzygy
 where
     C: Context
         + ModelAccess
-        + ModelMut
+        + ModelModify
         + ResourceAccess
         + DispatchEffect
         + EmitEvent
         + SpawnThread
         + SpawnAsync,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
             models: <C as ModelAccess>::models(&cx).clone(),
             resources: <C as ResourceAccess>::resources(&cx).clone(),
             dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx),
+            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx).clone(),
         }
     }
 }
@@ -212,20 +185,20 @@ impl<C: Context> FromContext<C> for Syzygy
 where
     C: Context
         + ModelAccess
-        + ModelMut
+        + ModelModify
         + ResourceAccess
         + DispatchEffect
         + EmitEvent
         + SpawnThread
         + SpawnParallel,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
             models: <C as ModelAccess>::models(&cx).clone(),
             resources: <C as ResourceAccess>::resources(&cx).clone(),
             dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx),
+            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx).clone(),
         }
     }
 }
@@ -235,7 +208,7 @@ impl<C: Context> FromContext<C> for Syzygy
 where
     C: Context
         + ModelAccess
-        + ModelMut
+        + ModelModify
         + ResourceAccess
         + DispatchEffect
         + EmitEvent
@@ -243,14 +216,14 @@ where
         + SpawnParallel
         + SpawnAsync,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
             models: <C as ModelAccess>::models(&cx).clone(),
             resources: <C as ResourceAccess>::resources(&cx).clone(),
             dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx),
+            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx).clone(),
+            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx).clone(),
         }
     }
 }
@@ -265,7 +238,7 @@ impl ModelAccess for Syzygy {
     }
 }
 
-impl ModelMut for Syzygy {}
+impl ModelModify for Syzygy {}
 
 impl ResourceAccess for Syzygy {
     fn resources(&self) -> &Resources {
@@ -303,11 +276,6 @@ impl SpawnParallel for Syzygy {
 
 impl Subscribe for Syzygy {}
 impl Unsubscribe for Syzygy {}
-
-#[cfg(feature = "role")]
-impl RoleHolder for Syzygy {
-    type Role = role::Root;
-}
 
 // // impl<M: Model> EffectBuilder<M> {
 // //     #[must_use]

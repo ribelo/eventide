@@ -5,62 +5,53 @@ use crate::{
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
     spawn::SpawnAsync,
-    syzygy::Syzygy,
 };
 
-#[cfg(feature = "role")]
-use crate::role::{RoleHolder, Root};
-
-use super::{Context, FromContext};
+use super::{BorrowFromContext, Context, FromContext};
 
 #[derive(Debug, Clone)]
-pub struct AsyncContext {
+pub struct AsyncContext<'a> {
     resources: Resources,
-    dispatcher: Dispatcher,
+    dispatcher: Dispatcher<'a>,
     event_bus: EventBus,
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
-#[cfg(feature = "role")]
-impl RoleHolder for AsyncContext {
-    type Role = Root;
-}
+impl<'a> Context for AsyncContext<'a> {}
 
-impl Context for AsyncContext {}
-
-impl<C> FromContext<C> for AsyncContext
+impl<'a, C> FromContext<C> for AsyncContext<'a>
 where
-    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnAsync + 'static,
+    C: ResourceAccess + DispatchEffect<'a> + EmitEvent + SpawnAsync + 'static,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
-            resources: <C as ResourceAccess>::resources(&cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx).clone(),
+            resources: <C as ResourceAccess>::resources(cx).clone(),
+            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
+            tokio_rt: <C as SpawnAsync>::tokio_rt(cx).clone(),
         }
     }
 }
 
-impl ResourceAccess for AsyncContext {
+impl<'a> ResourceAccess for AsyncContext<'a> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl DispatchEffect for AsyncContext {
-    fn dispatcher(&self) -> &Dispatcher {
+impl<'a> DispatchEffect<'a> for AsyncContext<'a> {
+    fn dispatcher(&'a self) -> &'a Dispatcher<'a> {
         &self.dispatcher
     }
 }
 
-impl EmitEvent for AsyncContext {
+impl<'a> EmitEvent for AsyncContext<'a> {
     fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
 }
 
-impl SpawnAsync for AsyncContext {
+impl<'a> SpawnAsync for AsyncContext<'a> {
     fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime> {
         Arc::clone(&self.tokio_rt)
     }

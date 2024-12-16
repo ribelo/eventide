@@ -1,18 +1,20 @@
 #[cfg(feature = "async")]
 use std::future::Future;
+
+#[cfg(feature = "async")]
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-use crate::{context::{thread::ThreadContext, Context, FromContext}, syzygy::Syzygy};
+use crate::context::{thread::ThreadContext, Context, FromContext};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: Context
+pub trait SpawnThread<'a>: Context
 where
-    ThreadContext: FromContext<Self>,
+    ThreadContext<'a>: FromContext<Self>,
 {
     fn spawn<F, R>(&self, f: F) -> crossbeam_channel::Receiver<R>
     where
@@ -20,7 +22,7 @@ where
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        let ctx = FromContext::from_context(self.clone());
+        let ctx = ThreadContext::from_context(self);
         std::thread::spawn(move || {
             let result = f(ctx);
             let _ = tx.send(result);
@@ -54,7 +56,7 @@ where
         R: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let ctx = FromContext::from_context(self.clone());
+        let ctx = AsyncContext::from_context(self);
 
         self.tokio_rt().spawn(async {
             let result = f(ctx).await;
@@ -77,7 +79,7 @@ where
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        let ctx = FromContext::from_context(self.clone());
+        let ctx = ThreadContext::from_context(self);
 
         self.rayon_pool().spawn(move || {
             let result = f(ctx);

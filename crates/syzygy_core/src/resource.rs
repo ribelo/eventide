@@ -7,14 +7,12 @@ use std::{
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use crate::context::Context;
-#[cfg(feature = "role")]
-use crate::role::{ImpliedBy, RoleGuarded, RoleHolder};
+use crate::context::{Context, BorrowFromContext};
 
 #[derive(Debug)]
-pub struct Resource(RwLock<Box<dyn Any + Send + Sync + 'static>>);
+pub struct ResourceBox(RwLock<Box<dyn Any + Send + Sync + 'static>>);
 
-impl Deref for Resource {
+impl Deref for ResourceBox {
     type Target = RwLock<Box<dyn Any + Send + Sync>>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -25,16 +23,6 @@ impl Deref for Resource {
 pub struct ResourcesBuilder(FxHashMap<TypeId, Box<dyn Any + Send + Sync>>);
 
 impl ResourcesBuilder {
-    #[cfg(feature = "role")]
-    #[must_use]
-    pub fn insert<T>(mut self, resource: T) -> Self
-    where
-        T: RoleGuarded + Clone + Send + Sync + 'static,
-    {
-        self.0.insert(TypeId::of::<T>(), Box::new(resource));
-        self
-    }
-    #[cfg(not(feature = "role"))]
     #[must_use]
     pub fn insert<T>(mut self, resource: T) -> Self
     where
@@ -48,7 +36,7 @@ impl ResourcesBuilder {
         let resources = self
             .0
             .into_iter()
-            .map(|(id, resource)| (id, Resource(RwLock::new(resource))))
+            .map(|(id, resource)| (id, ResourceBox(RwLock::new(resource))))
             .collect();
 
         Resources(Arc::new(resources))
@@ -56,10 +44,10 @@ impl ResourcesBuilder {
 }
 
 #[derive(Debug, Clone)]
-pub struct Resources(Arc<FxHashMap<TypeId, Resource>>);
+pub struct Resources(Arc<FxHashMap<TypeId, ResourceBox>>);
 
 impl Deref for Resources {
-    type Target = Arc<FxHashMap<TypeId, Resource>>;
+    type Target = Arc<FxHashMap<TypeId, ResourceBox>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -80,26 +68,6 @@ impl Resources {
     }
 }
 
-#[cfg(feature = "role")]
-pub trait ResourceAccess: Context + RoleHolder {
-    fn resources(&self) -> &Resources;
-    fn resource<T>(&self) -> T
-    where
-        T: RoleGuarded + Clone + Send + Sync + 'static,
-        T::Role: ImpliedBy<<Self as RoleHolder>::Role>,
-    {
-        self.resources().get::<T>().unwrap()
-    }
-    fn try_resource<T>(&self) -> Option<T>
-    where
-        T: RoleGuarded + Clone + Send + Sync + 'static,
-        T::Role: ImpliedBy<<Self as RoleHolder>::Role>,
-    {
-        self.resources().get::<T>()
-    }
-}
-
-#[cfg(not(feature = "role"))]
 pub trait ResourceAccess: Context {
     fn resources(&self) -> &Resources;
     fn resource<T>(&self) -> T
@@ -113,5 +81,38 @@ pub trait ResourceAccess: Context {
         T: Clone + Send + Sync + 'static,
     {
         self.resources().get::<T>()
+    }
+}
+
+pub struct Resource<T>(pub T)
+where
+    T: Clone + Send + Sync + 'static;
+
+impl<'a, C, T> BorrowFromContext<'a, C> for Resource<T>
+where
+    C: Context + ResourceAccess,
+    T: Clone + Send + Sync + 'static,
+{
+    fn from_context(context: &'a C) -> Self {
+        context.resource::<T>().into()
+    }
+}
+
+impl<T> From<T> for Resource<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> Deref for Resource<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }

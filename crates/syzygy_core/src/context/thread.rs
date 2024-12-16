@@ -1,32 +1,26 @@
 #[cfg(feature = "parallel")]
 use std::sync::Arc;
 
-#[cfg(feature = "role")]
-use crate::role::{RoleHolder, Root};
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
-    spawn::SpawnThread,
 };
 
 #[cfg(feature = "parallel")]
 use crate::spawn::SpawnParallel;
+#[cfg(not(feature = "parallel"))]
+use crate::spawn::SpawnThread;
 
 use super::{Context, FromContext};
 
 #[derive(Clone)]
-pub struct ThreadContext {
+pub struct ThreadContext<'a> {
     resources: Resources,
-    dispatcher: Dispatcher,
+    dispatcher: Dispatcher<'a>,
     event_bus: EventBus,
     #[cfg(feature = "parallel")]
     rayon_pool: Arc<rayon::ThreadPool>,
-}
-
-#[cfg(feature = "role")]
-impl RoleHolder for ThreadContext {
-    type Role = Root;
 }
 
 impl Context for ThreadContext {}
@@ -36,11 +30,11 @@ impl<C> FromContext<C> for ThreadContext
 where
     C: ResourceAccess + DispatchEffect + EmitEvent + SpawnThread + 'static,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
-            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
-            resources: <C as ResourceAccess>::resources(&cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
+            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
+            resources: <C as ResourceAccess>::resources(cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
         }
     }
 }
@@ -50,12 +44,12 @@ impl<C> FromContext<C> for ThreadContext
 where
     C: ResourceAccess + DispatchEffect + EmitEvent + SpawnParallel + 'static,
 {
-    fn from_context(cx: C) -> Self {
+    fn from_context(cx: &C) -> Self {
         Self {
-            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
-            resources: <C as ResourceAccess>::resources(&cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx).clone(),
+            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
+            resources: <C as ResourceAccess>::resources(cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
+            rayon_pool: <C as SpawnParallel>::rayon_pool(cx).clone(),
         }
     }
 }
