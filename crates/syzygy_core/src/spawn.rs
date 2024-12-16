@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 use std::future::Future;
 
 #[cfg(feature = "async")]

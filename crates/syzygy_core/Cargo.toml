@@ -7,6 +7,7 @@ edition = "2021"
 default = ["unsync"]
 async = ["dep:tokio"]
 parallel = ["dep:rayon"]
+role = []
 sync = []
 unsync = []
 

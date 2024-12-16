@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 use std::sync::Arc;
 
 use crate::{
@@ -6,10 +7,11 @@ use crate::{
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelMut, Models, ModelsBuilder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
-    role::{self,  RoleGuarded, RoleHolder},
     spawn::SpawnThread,
 };
 
+#[cfg(feature = "role")]
+use crate::role::{self, RoleGuarded, RoleHolder};
 #[cfg(feature = "async")]
 use crate::spawn::SpawnAsync;
 #[cfg(feature = "parallel")]
@@ -27,6 +29,7 @@ pub struct SyzygyBuilder {
 
 impl SyzygyBuilder {
     #[must_use]
+    #[cfg(feature = "role")]
     pub fn model<M>(self, model: M) -> Self
     where
         M: RoleGuarded + 'static,
@@ -40,11 +43,40 @@ impl SyzygyBuilder {
             rayon_pool: self.rayon_pool,
         }
     }
+    #[cfg(not(feature = "role"))]
+    pub fn model<M>(self, model: M) -> Self
+    where
+        M: 'static,
+    {
+        Self {
+            models: self.models.insert(model),
+            resources: self.resources,
+            #[cfg(feature = "async")]
+            tokio_rt: self.tokio_rt,
+            #[cfg(feature = "parallel")]
+            rayon_pool: self.rayon_pool,
+        }
+    }
 
+    #[cfg(feature = "role")]
     #[must_use]
     pub fn resource<T>(self, resource: T) -> Self
     where
         T: RoleGuarded + Clone + Send + Sync + 'static,
+    {
+        Self {
+            models: self.models,
+            resources: self.resources.insert(resource),
+            #[cfg(feature = "async")]
+            tokio_rt: self.tokio_rt,
+            #[cfg(feature = "parallel")]
+            rayon_pool: self.rayon_pool,
+        }
+    }
+    #[cfg(not(feature = "role"))]
+    pub fn resource<T>(self, resource: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
     {
         Self {
             models: self.models,
@@ -103,14 +135,14 @@ impl SyzygyBuilder {
 
 #[derive(Debug, Clone)]
 pub struct Syzygy {
-    pub(crate) models: Models,
-    pub(super) resources: Resources,
-    pub(crate) dispatcher: Dispatcher,
-    pub(crate) event_bus: EventBus,
+    pub models: Models,
+    pub resources: Resources,
+    pub dispatcher: Dispatcher,
+    pub event_bus: EventBus,
     #[cfg(feature = "async")]
-    pub(crate) tokio_rt: Arc<tokio::runtime::Runtime>,
+    pub tokio_rt: Arc<tokio::runtime::Runtime>,
     #[cfg(feature = "parallel")]
-    pub(crate) rayon_pool: Arc<rayon::ThreadPool>,
+    pub rayon_pool: Arc<rayon::ThreadPool>,
 }
 
 impl Syzygy {
@@ -192,6 +224,7 @@ impl SpawnParallel for Syzygy {
     }
 }
 
+#[cfg(feature = "role")]
 impl RoleHolder for Syzygy {
     type Role = role::Root;
 }

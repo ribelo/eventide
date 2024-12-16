@@ -1,5 +1,11 @@
+#[cfg(feature = "role")]
+use crate::role::{AnyRole, RoleHolder};
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, model::{ModelAccess, Models}, role::{self, RoleHolder}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher},
+    event_bus::{EmitEvent, EventBus},
+    model::{ModelAccess, Models},
+    resource::{ResourceAccess, Resources},
+    syzygy::Syzygy,
 };
 
 use super::{Context, FromContext};
@@ -25,8 +31,9 @@ impl FromContext<Syzygy> for EventContext {
     }
 }
 
+#[cfg(feature = "role")]
 impl RoleHolder for EventContext {
-    type Role = role::AnyRole;
+    type Role = AnyRole;
 }
 
 impl ModelAccess for EventContext {

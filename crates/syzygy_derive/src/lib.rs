@@ -68,12 +68,12 @@ pub fn derive_role(input: TokenStream) -> TokenStream {
     role::role(input)
 }
 
-#[proc_macro_derive(GrantRole, attributes(syzygy))]
+#[proc_macro_derive(RoleHolder, attributes(syzygy))]
 pub fn derive_grant_role(input: TokenStream) -> TokenStream {
     role::grant_role(input)
 }
 
-#[proc_macro_derive(GuardRole, attributes(syzygy))]
+#[proc_macro_derive(RoleGuarded, attributes(syzygy))]
 pub fn derive_guard_role(input: TokenStream) -> TokenStream {
     role::guard_role(input)
 }
@@ -82,3 +82,8 @@ pub fn derive_guard_role(input: TokenStream) -> TokenStream {
 pub fn derive_implied_by(input: TokenStream) -> TokenStream {
     role::implied_by(input)
 }
+
+// #[proc_macro_attribute]
+// pub fn context(args: TokenStream, input: TokenStream) -> TokenStream {
+//     context::syzygy(args, input)
+// }

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, role::{self, RoleHolder}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
 };
+
+#[cfg(feature = "role")]
+use crate::role::{RoleHolder, Root};
 
 use super::{Context, FromContext};
 
@@ -14,8 +17,9 @@ pub struct AsyncContext {
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
+#[cfg(feature = "role")]
 impl RoleHolder for AsyncContext {
-    type Role = role::Root;
+    type Role = Root;
 }
 
 impl Context for AsyncContext {}

@@ -8,8 +8,8 @@ pub fn role(input: TokenStream) -> TokenStream {
     let name = input.ident.clone();
 
     let expanded = quote! {
-        impl Role for #name {}
-        impl ImpliedBy<#name> for ::syzygy_core::role::AnyRole {}
+        impl syzygy::syzygy_core::role::Role for #name {}
+        impl syzygy::syzygy_core::role::ImpliedBy<#name> for ::syzygy_core::role::AnyRole {}
     };
 
     TokenStream::from(expanded)
@@ -22,6 +22,15 @@ struct RoleOpts {
     role: syn::Path,
 }
 
+pub fn generate_role_holder_trait(name: syn::Ident, role: syn::Path) -> TokenStream {
+    let expanded = quote! {
+        impl syzygy::syzygy_core::role::RoleHolder for #name {
+            type Role = #role;
+        }
+    };
+    TokenStream::from(expanded)
+}
+
 pub fn grant_role(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
@@ -29,15 +38,10 @@ pub fn grant_role(input: TokenStream) -> TokenStream {
     let opts = RoleOpts::from_derive_input(&input)
         .expect("PermissionHolder requires #[permission(ty = \"Type\")] attribute");
 
-    let permission_type = opts.role;
+    let role = opts.role;
 
-    let expanded = quote! {
-        impl RoleHolder for #name {
-            type Role = #permission_type;
-        }
-    };
 
-    TokenStream::from(expanded)
+    generate_role_holder_trait(name, role)
 }
 
 pub fn guard_role(input: TokenStream) -> TokenStream {
@@ -50,7 +54,7 @@ pub fn guard_role(input: TokenStream) -> TokenStream {
     let permission_type = opts.role;
 
     let expanded = quote! {
-        impl RoleGuarded for #name {
+        impl syzygy::syzygy_core::role::RoleGuarded for #name {
             type Role = #permission_type;
         }
     };
@@ -73,7 +77,6 @@ pub fn implied_by(input: TokenStream) -> TokenStream {
     let opts = match ImpliedByOpts::from_derive_input(&input) {
         Ok(opts) => opts,
         Err(err) => {
-            dbg!(&err);
             return TokenStream::from(quote! {
                 compile_error!(format!("ImpliedBy error: {:?}", err));
             });
@@ -83,7 +86,7 @@ pub fn implied_by(input: TokenStream) -> TokenStream {
     let permission_type = opts.implied_by;
 
     let expanded = quote! {
-        #(impl ImpliedBy<#permission_type> for #name {})*
+        #(impl syzygy::syzygy_core::role::ImpliedBy<#permission_type> for #name {})*
     };
 
     TokenStream::from(expanded)

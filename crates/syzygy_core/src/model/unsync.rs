@@ -7,7 +7,9 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::{context::Context, role::{ImpliedBy, RoleGuarded, RoleHolder}};
+use crate::context::Context;
+#[cfg(feature = "role")]
+use crate::role::{ImpliedBy, RoleGuarded, RoleHolder};
 
 #[derive(Debug)]
 pub struct Model(RefCell<Box<dyn Any + 'static>>);
@@ -24,6 +26,15 @@ pub struct ModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
 
 impl ModelsBuilder {
     #[must_use]
+    #[cfg(not(feature = "role"))]
+    pub fn insert<M>(mut self, model: M) -> Self
+    where
+        M: 'static,
+    {
+        self.0.insert(TypeId::of::<M>(), Box::new(model));
+        self
+    }
+    #[cfg(feature = "role")]
     pub fn insert<M>(mut self, model: M) -> Self
     where
         M: RoleGuarded + 'static,
@@ -86,7 +97,8 @@ impl Models {
     }
 }
 
-pub trait ModelAccess: Context {
+#[cfg(feature = "role")]
+pub trait ModelAccess: Context + RoleHolder {
     fn models(&self) -> &Models;
     fn model<M>(&self) -> Ref<M>
     where
@@ -113,6 +125,32 @@ pub trait ModelAccess: Context {
     }
 }
 
+#[cfg(not(feature = "role"))]
+pub trait ModelAccess: Context {
+    fn models(&self) -> &Models;
+    fn model<M>(&self) -> Ref<M>
+    where
+        M: 'static,
+    {
+        self.models().get::<M>().unwrap()
+    }
+    fn try_model<M>(&self) -> Option<Ref<M>>
+    where
+        M: 'static,
+    {
+        self.models().get::<M>()
+    }
+    fn query<M, F, R>(&self, f: F) -> R
+    where
+        M: 'static,
+        F: FnOnce(&M) -> R,
+        R: 'static,
+    {
+        f(&self.model())
+    }
+}
+
+#[cfg(feature = "role")]
 pub trait ModelMut: ModelAccess {
     fn model_mut<M>(&self) -> RefMut<M>
     where
@@ -132,6 +170,29 @@ pub trait ModelMut: ModelAccess {
     where
         M: RoleGuarded + 'static,
         M::Role: ImpliedBy<<Self as RoleHolder>::Role>,
+        F: FnMut(&mut M),
+    {
+        f(&mut self.model_mut());
+    }
+}
+
+#[cfg(not(feature = "role"))]
+pub trait ModelMut: ModelAccess {
+    fn model_mut<M>(&self) -> RefMut<M>
+    where
+        M: 'static,
+    {
+        self.models().get_mut::<M>().unwrap()
+    }
+    fn try_model_mut<M>(&self) -> Option<RefMut<M>>
+    where
+        M: 'static,
+    {
+        self.models().get_mut::<M>()
+    }
+    fn update<M, F>(&self, mut f: F)
+    where
+        M: 'static,
         F: FnMut(&mut M),
     {
         f(&mut self.model_mut());

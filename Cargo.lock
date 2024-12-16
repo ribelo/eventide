@@ -371,6 +371,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "syzygy"
+version = "0.1.0"
+dependencies = [
+ "syzygy-core",
+ "syzygy-derive",
+]
+
+[[package]]
 name = "syzygy-core"
 version = "0.1.0"
 dependencies = [

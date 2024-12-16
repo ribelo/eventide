@@ -7,7 +7,9 @@ use std::{
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use crate::{context::Context, role::{ImpliedBy, RoleGuarded, RoleHolder}};
+use crate::context::Context;
+#[cfg(feature = "role")]
+use crate::role::{ImpliedBy, RoleGuarded, RoleHolder};
 
 #[derive(Debug)]
 pub struct Resource(RwLock<Box<dyn Any + Send + Sync + 'static>>);
@@ -23,10 +25,20 @@ impl Deref for Resource {
 pub struct ResourcesBuilder(FxHashMap<TypeId, Box<dyn Any + Send + Sync>>);
 
 impl ResourcesBuilder {
+    #[cfg(feature = "role")]
     #[must_use]
     pub fn insert<T>(mut self, resource: T) -> Self
     where
         T: RoleGuarded + Clone + Send + Sync + 'static,
+    {
+        self.0.insert(TypeId::of::<T>(), Box::new(resource));
+        self
+    }
+    #[cfg(not(feature = "role"))]
+    #[must_use]
+    pub fn insert<T>(mut self, resource: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
     {
         self.0.insert(TypeId::of::<T>(), Box::new(resource));
         self
@@ -68,7 +80,8 @@ impl Resources {
     }
 }
 
-pub trait ResourceAccess: Context {
+#[cfg(feature = "role")]
+pub trait ResourceAccess: Context + RoleHolder {
     fn resources(&self) -> &Resources;
     fn resource<T>(&self) -> T
     where
@@ -81,6 +94,23 @@ pub trait ResourceAccess: Context {
     where
         T: RoleGuarded + Clone + Send + Sync + 'static,
         T::Role: ImpliedBy<<Self as RoleHolder>::Role>,
+    {
+        self.resources().get::<T>()
+    }
+}
+
+#[cfg(not(feature = "role"))]
+pub trait ResourceAccess: Context {
+    fn resources(&self) -> &Resources;
+    fn resource<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.resources().get::<T>().unwrap()
+    }
+    fn try_resource<T>(&self) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
     {
         self.resources().get::<T>()
     }

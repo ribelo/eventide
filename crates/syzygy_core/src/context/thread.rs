@@ -1,13 +1,15 @@
+#[cfg(feature = "parallel")]
 use std::sync::Arc;
 
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
-    role::{self, RoleHolder},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
     syzygy::Syzygy,
 };
+#[cfg(feature = "role")]
+use crate::role::{Root, RoleHolder};
 
 #[cfg(feature = "parallel")]
 use crate::spawn::SpawnParallel;
@@ -23,8 +25,9 @@ pub struct ThreadContext {
     rayon_pool: Arc<rayon::ThreadPool>,
 }
 
+#[cfg(feature = "role")]
 impl RoleHolder for ThreadContext {
-    type Role = role::Root;
+    type Role = Root;
 }
 
 impl Context for ThreadContext {}
