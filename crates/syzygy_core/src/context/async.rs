@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher}, event_bus::{EmitEvent, EventBus}, resource::{ResourceAccess, Resources}, spawn::SpawnAsync, syzygy::Syzygy
+    dispatch::{DispatchEffect, Dispatcher},
+    event_bus::{EmitEvent, EventBus},
+    resource::{ResourceAccess, Resources},
+    spawn::SpawnAsync,
+    syzygy::Syzygy,
 };
 
 #[cfg(feature = "role")]
@@ -24,19 +28,16 @@ impl RoleHolder for AsyncContext {
 
 impl Context for AsyncContext {}
 
-impl FromContext<AsyncContext> for AsyncContext {
-    fn from_context(cx: AsyncContext) -> Self {
-        cx
-    }
-}
-
-impl FromContext<Syzygy> for AsyncContext {
-    fn from_context(cx: Syzygy) -> Self {
+impl<C> FromContext<C> for AsyncContext
+where
+    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnAsync + 'static,
+{
+    fn from_context(cx: C) -> Self {
         Self {
-            dispatcher: cx.dispatcher.clone(),
-            resources: cx.resources.clone(),
-            event_bus: cx.event_bus.clone(),
-            tokio_rt: Arc::clone(&cx.tokio_rt),
+            resources: <C as ResourceAccess>::resources(&cx).clone(),
+            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
+            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx).clone(),
         }
     }
 }
@@ -60,7 +61,7 @@ impl EmitEvent for AsyncContext {
 }
 
 impl SpawnAsync for AsyncContext {
-    fn tokio_rt(&self) -> &tokio::runtime::Runtime {
-        &self.tokio_rt
+    fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime> {
+        Arc::clone(&self.tokio_rt)
     }
 }

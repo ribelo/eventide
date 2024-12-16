@@ -1,15 +1,14 @@
 #[cfg(feature = "parallel")]
 use std::sync::Arc;
 
+#[cfg(feature = "role")]
+use crate::role::{RoleHolder, Root};
 use crate::{
     dispatch::{DispatchEffect, Dispatcher},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
-    syzygy::Syzygy,
 };
-#[cfg(feature = "role")]
-use crate::role::{Root, RoleHolder};
 
 #[cfg(feature = "parallel")]
 use crate::spawn::SpawnParallel;
@@ -32,20 +31,31 @@ impl RoleHolder for ThreadContext {
 
 impl Context for ThreadContext {}
 
-impl FromContext<ThreadContext> for ThreadContext {
-    fn from_context(cx: ThreadContext) -> Self {
-        cx
+#[cfg(not(feature = "parallel"))]
+impl<C> FromContext<C> for ThreadContext
+where
+    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnThread + 'static,
+{
+    fn from_context(cx: C) -> Self {
+        Self {
+            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
+            resources: <C as ResourceAccess>::resources(&cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
+        }
     }
 }
 
-impl FromContext<Syzygy> for ThreadContext {
-    fn from_context(cx: Syzygy) -> Self {
+#[cfg(feature = "parallel")]
+impl<C> FromContext<C> for ThreadContext
+where
+    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnParallel + 'static,
+{
+    fn from_context(cx: C) -> Self {
         Self {
-            dispatcher: cx.dispatcher.clone(),
-            resources: cx.resources.clone(),
-            event_bus: cx.event_bus.clone(),
-            #[cfg(feature = "parallel")]
-            rayon_pool: Arc::clone(&cx.rayon_pool),
+            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
+            resources: <C as ResourceAccess>::resources(&cx).clone(),
+            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
+            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx).clone(),
         }
     }
 }
@@ -68,11 +78,9 @@ impl EmitEvent for ThreadContext {
     }
 }
 
-impl SpawnThread for ThreadContext {}
-
 #[cfg(feature = "parallel")]
 impl SpawnParallel for ThreadContext {
-    fn rayon_pool(&self) -> &rayon::ThreadPool {
-        &self.rayon_pool
+    fn rayon_pool(&self) -> Arc<rayon::ThreadPool> {
+        Arc::clone(&self.rayon_pool)
     }
 }

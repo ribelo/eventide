@@ -1,15 +1,16 @@
 #[cfg(feature = "async")]
 use std::future::Future;
+use std::sync::Arc;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-use crate::{context::{thread::ThreadContext, FromContext}, syzygy::Syzygy};
+use crate::{context::{thread::ThreadContext, Context, FromContext}, syzygy::Syzygy};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: FromContext<Syzygy>
+pub trait SpawnThread: Context
 where
     ThreadContext: FromContext<Self>,
 {
@@ -41,11 +42,11 @@ pub enum AsyncTaskError {
 }
 
 #[cfg(feature = "async")]
-pub trait SpawnAsync: FromContext<Syzygy>
+pub trait SpawnAsync: Context
 where
     AsyncContext: FromContext<Self>,
 {
-    fn tokio_rt(&self) -> &tokio::runtime::Runtime;
+    fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime>;
     fn spawn_task<F, Fut, R>(&self, f: F) -> tokio::sync::oneshot::Receiver<R>
     where
         F: FnOnce(AsyncContext) -> Fut + Send + Sync + 'static,
@@ -65,11 +66,11 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel: FromContext<Syzygy>
+pub trait SpawnParallel: Context
 where
     ThreadContext: FromContext<Self>,
 {
-    fn rayon_pool(&self) -> &rayon::ThreadPool;
+    fn rayon_pool(&self) -> Arc<rayon::ThreadPool>;
     fn spawn_parallel<F, R>(&self, f: F) -> crossbeam_channel::Receiver<R>
     where
         F: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
