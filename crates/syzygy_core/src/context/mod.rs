@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 use std::future::Future;
 
 #[cfg(feature = "async")]
@@ -129,13 +130,16 @@ impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
 #[cfg(feature = "async")]
 impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
 
+#[cfg(all(feature = "async", feature = "parallel"))]
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::effect_bus::DispatchEffect;
     use crate::model::{Model, ModelMut};
     use crate::resource::Resource;
-    use crate::spawn::{SpawnAsync, SpawnThread};
-    use crate::{context::Context, syzygy::SyzygyBuilder};
+    use crate::spawn::{SpawnAsync, SpawnParallel, SpawnThread};
+    use crate::{context::Context, syzygy::Syzygy};
 
     #[test]
     fn test_context_executor() {
@@ -151,9 +155,15 @@ mod tests {
         let resource = TestResource {
             name: "test".to_string(),
         };
-        let syzygy = SyzygyBuilder::default()
+        let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+        let tokio_handle = tokio_rt.handle().clone();
+        let rayon_pool = Arc::new(rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        let syzygy = Syzygy::builder()
             .model(model)
             .resource(resource)
+            .tokio_handle(tokio_handle)
+            .rayon_pool(rayon_pool)
             .build();
 
         syzygy.execute(|| println!("nop"));
@@ -174,9 +184,11 @@ mod tests {
 
         syzygy.spawn(|| println!("Hello from thread"));
         syzygy.spawn_task(|| async { println!("Hello from async") });
+        syzygy.spawn_parallel(|| println!("Hello from rayon"));
 
         syzygy.handle_effects();
 
         syzygy.execute(|| println!("Hello, world!"));
+        // std::thread::sleep(Duration::from_secs(1));
     }
 }

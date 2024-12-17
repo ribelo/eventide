@@ -50,7 +50,7 @@ pub trait SpawnAsync: Context
 where
     AsyncContext: FromContext<Self>,
 {
-    fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime>;
+    fn tokio_handle(&self) -> &tokio::runtime::Handle;
     fn spawn_task<H, T, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
         H: AsyncContextExecutor<AsyncContext, T, Fut, R> + Send + Sync + 'static,
@@ -60,7 +60,7 @@ where
         let (tx, rx) = tokio::sync::oneshot::channel();
         let ctx = AsyncContext::from_context(self);
 
-        self.tokio_rt().spawn(async move {
+        self.tokio_handle().spawn(async move {
             let result = handler.call(&ctx).await;
             let _ = tx.send(result);
         });
@@ -75,16 +75,16 @@ where
     ThreadContext: FromContext<Self>,
 {
     fn rayon_pool(&self) -> Arc<rayon::ThreadPool>;
-    fn spawn_parallel<F, R>(&self, f: F) -> crossbeam_channel::Receiver<R>
+    fn spawn_parallel<H, T, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        F: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
+        H: ContextExecutor<ThreadContext, T, R> + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
 
         self.rayon_pool().spawn(move || {
-            let result = f(ctx);
+            let result = handler.call(&ctx);
             let _ = tx.send(result);
         });
         rx

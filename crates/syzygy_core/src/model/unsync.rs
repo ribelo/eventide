@@ -5,6 +5,8 @@ use std::{
     ops::Deref,
 };
 
+use bon::Builder;
+
 use generational_box::{
     AnyStorage, GenerationalBox, GenerationalRef, GenerationalRefMut, Owner, UnsyncStorage,
 };
@@ -12,37 +14,34 @@ use rustc_hash::FxHashMap;
 
 use crate::context::{Context, FromContext};
 
-#[derive(Debug, Default)]
-pub struct UnsyncModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
+// impl UnsyncModelsBuilder {
+//     #[must_use]
+//     pub fn insert<M>(mut self, model: M) -> Self
+//     where
+//         M: 'static,
+//     {
+//         self.0.insert(TypeId::of::<M>(), Box::new(model));
+//         self
+//     }
+//     #[must_use]
+//     pub fn build(self) -> UnsyncModels {
+//         let owner = UnsyncStorage::owner();
+//         let models: FxHashMap<_, _> = self
+//             .0
+//             .into_iter()
+//             .map(|(id, model)| (id, owner.insert(model)))
+//             .collect();
 
-impl UnsyncModelsBuilder {
-    #[must_use]
-    pub fn insert<M>(mut self, model: M) -> Self
-    where
-        M: 'static,
-    {
-        self.0.insert(TypeId::of::<M>(), Box::new(model));
-        self
-    }
-    #[must_use]
-    pub fn build(self) -> UnsyncModels {
-        let owner = UnsyncStorage::owner();
-        let models: FxHashMap<_, _> = self
-            .0
-            .into_iter()
-            .map(|(id, model)| (id, owner.insert(model)))
-            .collect();
+//         UnsyncModels {
+//             _owner: owner,
+//             models,
+//         }
+//     }
+// }
 
-        UnsyncModels {
-            _owner: owner,
-            models,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default, Builder)]
 pub struct UnsyncModels {
-    _owner: Owner,
+    owner: Owner,
     models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any>>>,
 }
 
@@ -55,9 +54,12 @@ impl fmt::Debug for UnsyncModels {
 }
 
 impl UnsyncModels {
-    #[must_use]
-    pub fn builder() -> UnsyncModelsBuilder {
-        UnsyncModelsBuilder::default()
+    pub fn insert<M>(&mut self, model: M)
+    where
+        M: 'static,
+    {
+        self.models
+            .insert(TypeId::of::<M>(), self.owner.insert(Box::new(model)));
     }
 
     #[must_use]

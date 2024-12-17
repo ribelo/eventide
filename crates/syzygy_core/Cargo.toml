@@ -21,6 +21,7 @@ downcast-rs = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 generational-box = { workspace = true }
+bon = "3.3.0"
 
 [lints.clippy]
 all = { level = "warn", priority = -2 }

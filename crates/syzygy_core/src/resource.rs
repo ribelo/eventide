@@ -4,53 +4,14 @@ use std::{
     ops::Deref,
 };
 
-use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
-use parking_lot::RwLock;
+use generational_box::{GenerationalBox, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
 
 use crate::context::{Context, FromContext};
 
-#[derive(Debug)]
-pub struct ResourceBox(RwLock<Box<dyn Any + Send + Sync + 'static>>);
-
-impl Deref for ResourceBox {
-    type Target = RwLock<Box<dyn Any + Send + Sync>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ResourcesBuilder(FxHashMap<TypeId, Box<dyn Any + Send + Sync>>);
-
-impl ResourcesBuilder {
-    #[must_use]
-    pub fn insert<T>(mut self, resource: T) -> Self
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        self.0.insert(TypeId::of::<T>(), Box::new(resource));
-        self
-    }
-    #[must_use]
-    pub fn build(self) -> Resources {
-        let owner = SyncStorage::owner();
-        let models: FxHashMap<_, _> = self
-            .0
-            .into_iter()
-            .map(|(id, resource)| (id, owner.insert(resource)))
-            .collect();
-
-        Resources {
-            _owner: owner,
-            models,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Resources {
-    _owner: Owner<SyncStorage>,
+    owner: Owner<SyncStorage>,
     models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any + Send + Sync>, SyncStorage>>,
 }
 
@@ -63,6 +24,16 @@ impl fmt::Debug for Resources {
 }
 
 impl Resources {
+    pub fn insert<T>(&mut self, value: T)
+    where
+        T: Send + Sync + Clone + 'static,
+    {
+        let ty = TypeId::of::<T>();
+        let boxed_value = Box::new(value);
+        self.models
+            .insert(ty, self.owner.insert(boxed_value));
+    }
+
     #[must_use]
     pub fn get<T>(&self) -> Option<T>
     where

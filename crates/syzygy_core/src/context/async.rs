@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
@@ -14,7 +12,7 @@ pub struct AsyncContext {
     resources: Resources,
     effect_bus: EffectBus,
     event_bus: EventBus,
-    tokio_rt: Arc<tokio::runtime::Runtime>,
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl Context for AsyncContext {}
@@ -28,7 +26,7 @@ where
             resources: cx.resources().clone(),
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
-            tokio_rt: cx.tokio_rt(),
+            tokio_handle: cx.tokio_handle().clone(),
         }
     }
 }
@@ -52,7 +50,7 @@ impl EmitEvent for AsyncContext {
 }
 
 impl SpawnAsync for AsyncContext {
-    fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime> {
-        Arc::clone(&self.tokio_rt)
+    fn tokio_handle(&self) -> &tokio::runtime::Handle {
+        &self.tokio_handle
     }
 }

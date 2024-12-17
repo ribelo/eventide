@@ -1,3 +1,4 @@
+use bon::Builder;
 #[cfg(feature = "async")]
 use std::sync::Arc;
 
@@ -5,8 +6,8 @@ use crate::{
     context::{event::EventContext, Context, FromContext},
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
-    model::{ModelAccess, ModelModify, Models, ModelsBuilder},
-    resource::{ResourceAccess, Resources, ResourcesBuilder},
+    model::{ModelAccess, ModelModify, Models},
+    resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
 
@@ -15,117 +16,52 @@ use crate::spawn::SpawnAsync;
 #[cfg(feature = "parallel")]
 use crate::spawn::SpawnParallel;
 
-#[derive(Debug, Default)]
-pub struct SyzygyBuilder {
-    models: ModelsBuilder,
-    resources: ResourcesBuilder,
+#[derive(Debug, Clone, Builder)]
+pub struct Syzygy {
+    #[builder(field)]
+    pub models: Models,
+    #[builder(field)]
+    pub resources: Resources,
+    #[builder(skip)]
+    pub effect_bus: EffectBus,
+    #[builder(skip)]
+    pub event_bus: EventBus,
     #[cfg(feature = "async")]
-    tokio_rt: Option<tokio::runtime::Runtime>,
+    pub tokio_handle: tokio::runtime::Handle,
     #[cfg(feature = "parallel")]
-    rayon_pool: Option<rayon::ThreadPool>,
+    pub rayon_pool: Arc<rayon::ThreadPool>,
 }
 
-impl SyzygyBuilder {
-    #[must_use]
-    #[cfg(feature = "unsync")]
-    pub fn model<M>(self, model: M) -> Self
+#[cfg(feature = "unsync")]
+impl<S: syzygy_builder::State> SyzygyBuilder<S> {
+    pub fn model<M>(mut self, model: M) -> SyzygyBuilder<S>
     where
         M: 'static,
     {
-        Self {
-            models: self.models.insert(model),
-            resources: self.resources,
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-    #[cfg(feature = "sync")]
-    pub fn model<M>(self, model: M) -> Self
-    where
-        M: Send + Sync + 'static,
-    {
-        Self {
-            models: self.models.insert(model),
-            resources: self.resources,
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-
-    #[must_use]
-    pub fn resource<T>(self, resource: T) -> Self
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        Self {
-            models: self.models,
-            resources: self.resources.insert(resource),
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-
-    #[cfg(feature = "async")]
-    #[must_use]
-    pub fn tokio_rt(self, rt: tokio::runtime::Runtime) -> Self {
-        Self {
-            models: self.models,
-            resources: self.resources,
-            tokio_rt: Some(rt),
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool,
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[must_use]
-    pub fn rayon_pool(self, pool: rayon::ThreadPool) -> Self {
-        Self {
-            models: self.models,
-            resources: self.resources,
-            #[cfg(feature = "async")]
-            tokio_rt: self.tokio_rt,
-            rayon_pool: Some(pool),
-        }
-    }
-
-    #[must_use]
-    pub fn build(self) -> Syzygy {
-        let models = self.models.build();
-        let resources = self.resources.build();
-
-        Syzygy {
-            models,
-            resources,
-            effect_bus: EffectBus::default(),
-            event_bus: EventBus::default(),
-            #[cfg(feature = "async")]
-            tokio_rt: Arc::new(self.tokio_rt.unwrap()),
-            #[cfg(feature = "parallel")]
-            rayon_pool: Arc::new(
-                self.rayon_pool
-                    .unwrap_or_else(|| rayon::ThreadPoolBuilder::new().build().unwrap()),
-            ),
-        }
+        self.models.insert(model);
+        self
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Syzygy {
-    pub models: Models,
-    pub resources: Resources,
-    pub effect_bus: EffectBus,
-    pub event_bus: EventBus,
-    #[cfg(feature = "async")]
-    pub tokio_rt: Arc<tokio::runtime::Runtime>,
-    #[cfg(feature = "parallel")]
-    pub rayon_pool: Arc<rayon::ThreadPool>,
+#[cfg(feature = "sync")]
+impl<S: syzygy_builder::State> SyzygyBuilder<S> {
+    pub fn model<M>(mut self, model: M) -> SyzygyBuilder<S>
+    where
+        M: Sync + Send + 'static,
+    {
+        self.models.insert(model);
+        self
+    }
+}
+
+impl<S: syzygy_builder::State> SyzygyBuilder<S> {
+    pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<S>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.resources.insert(resource);
+        self
+    }
 }
 
 impl Syzygy {
@@ -148,7 +84,23 @@ impl Syzygy {
         self.handle_effects();
         self.handle_events();
     }
+    // pub fn shutdown(self) {
+    //     // Handle any pending effects/events first
+    //     self.handle_waiting();
+    //     #[cfg(feature = "async")]
+    //     // Shutdown with timeout
+    //     MutexGuard::map(self.tokio_runtime.lock(), |rt| {
+    //        rt.shutdown_background();
+    //        rt;
+    //     });
+    // }
 }
+
+// impl Drop for Syzygy {
+//     fn drop(&mut self) {
+//         self.handle_waiting();
+//     }
+// }
 
 impl Context for Syzygy {}
 
@@ -238,7 +190,7 @@ where
             resources: cx.resources().clone(),
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
-            tokio_rt: cx.tokio_rt(),
+            tokio_handle: cx.tokio_handle().clone(),
             rayon_pool: cx.rayon_pool(),
         }
     }
@@ -278,8 +230,8 @@ impl SpawnThread for Syzygy {}
 
 #[cfg(feature = "async")]
 impl SpawnAsync for Syzygy {
-    fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime> {
-        Arc::clone(&self.tokio_rt)
+    fn tokio_handle(&self) -> &tokio::runtime::Handle {
+        &self.tokio_handle
     }
 }
 
@@ -489,10 +441,11 @@ mod tests {
         name: String,
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         // Test initial state
         let counter = syzygy.model::<TestModel>().counter;
@@ -533,6 +486,7 @@ mod tests {
         assert_eq!(syzygy.model::<SecuredModel>().counter, 0);
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_resources() {
         let model = TestModel { counter: 0 };
@@ -542,7 +496,7 @@ mod tests {
         let secured_resource = SecuredResource {
             name: "test_str".to_string(),
         };
-        let syzygy = SyzygyBuilder::default()
+        let syzygy = Syzygy::builder()
             .model(model)
             .resource(test_resource)
             .resource(secured_resource)
@@ -564,10 +518,11 @@ mod tests {
         assert_eq!(secured_resource.unwrap().name, "test_str");
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_dispatch() {
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         // Test dispatching updates
         syzygy
@@ -593,11 +548,12 @@ mod tests {
         assert_eq!(syzygy.model::<TestModel>().counter, 5);
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_event_subscribe_unsubscribe() {
         use std::sync::atomic::{AtomicI32, Ordering};
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         #[derive(Debug)]
         struct TestEvent(i32);
@@ -630,11 +586,12 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_event_multiple_subscribers() {
         use std::sync::atomic::{AtomicI32, Ordering};
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         #[derive(Debug)]
         struct TestEvent(i32);
@@ -670,12 +627,13 @@ mod tests {
         assert_eq!(counter2.load(Ordering::SeqCst), 10);
     }
 
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn test_thread_spawn() {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
         let counter = Arc::new(AtomicI32::new(0));
 
         // Test spawning a thread that increments counter
@@ -711,13 +669,13 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 6);
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(all(feature = "async", not(feature = "parallel")))]
     #[test]
     fn test_tokio_spawn() {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default()
+        let syzygy = Syzygy::builder()
             .model(model)
             .tokio_rt(tokio::runtime::Runtime::new().unwrap())
             .build();
@@ -757,13 +715,13 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 6);
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(all(feature = "parallel", not(feature = "async")))]
     #[test]
     fn test_parallel_spawn() {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default()
+        let syzygy = Syzygy::builder()
             .model(model)
             .rayon_pool(rayon::ThreadPoolBuilder::new().build().unwrap())
             .build();
@@ -1200,12 +1158,13 @@ mod tests {
     //     assert!(!cx.is_running());
     // }
     // #[ignore]
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
