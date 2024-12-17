@@ -15,9 +15,9 @@ use crate::spawn::SpawnThread;
 use super::{Context, FromContext};
 
 #[derive(Clone)]
-pub struct ThreadContext<'a> {
+pub struct ThreadContext {
     resources: Resources,
-    dispatcher: Dispatcher<'a>,
+    dispatcher: Dispatcher,
     event_bus: EventBus,
     #[cfg(feature = "parallel")]
     rayon_pool: Arc<rayon::ThreadPool>,
@@ -49,7 +49,7 @@ where
             dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
             resources: <C as ResourceAccess>::resources(cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(cx).clone(),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(cx).clone(),
+            rayon_pool: <C as SpawnParallel>::rayon_pool(cx),
         }
     }
 }

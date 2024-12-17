@@ -7,51 +7,51 @@ use crate::{
     spawn::SpawnAsync,
 };
 
-use super::{BorrowFromContext, Context, FromContext};
+use super::{Context, FromContext};
 
 #[derive(Debug, Clone)]
-pub struct AsyncContext<'a> {
+pub struct AsyncContext {
     resources: Resources,
-    dispatcher: Dispatcher<'a>,
+    dispatcher: Dispatcher,
     event_bus: EventBus,
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
-impl<'a> Context for AsyncContext<'a> {}
+impl Context for AsyncContext {}
 
-impl<'a, C> FromContext<C> for AsyncContext<'a>
+impl<C> FromContext<C> for AsyncContext
 where
-    C: ResourceAccess + DispatchEffect<'a> + EmitEvent + SpawnAsync + 'static,
+    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnAsync + 'static,
 {
     fn from_context(cx: &C) -> Self {
         Self {
             resources: <C as ResourceAccess>::resources(cx).clone(),
             dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(cx).clone(),
+            tokio_rt: <C as SpawnAsync>::tokio_rt(cx),
         }
     }
 }
 
-impl<'a> ResourceAccess for AsyncContext<'a> {
+impl ResourceAccess for AsyncContext {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<'a> DispatchEffect<'a> for AsyncContext<'a> {
-    fn dispatcher(&'a self) -> &'a Dispatcher<'a> {
+impl DispatchEffect for AsyncContext {
+    fn dispatcher(&self) -> &Dispatcher {
         &self.dispatcher
     }
 }
 
-impl<'a> EmitEvent for AsyncContext<'a> {
+impl EmitEvent for AsyncContext {
     fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
 }
 
-impl<'a> SpawnAsync for AsyncContext<'a> {
+impl SpawnAsync for AsyncContext {
     fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime> {
         Arc::clone(&self.tokio_rt)
     }

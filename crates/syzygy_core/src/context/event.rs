@@ -3,51 +3,53 @@ use crate::{
     event_bus::{EmitEvent, EventBus},
     model::{ModelAccess, Models},
     resource::{ResourceAccess, Resources},
-    syzygy::Syzygy,
 };
 
-use super::{Context, BorrowFromContext};
+use super::{Context, FromContext};
 
 #[derive(Debug, Clone)]
-pub struct EventContext<'a> {
+pub struct EventContext {
     models: Models,
     resources: Resources,
-    dispatcher: Dispatcher<'a>,
+    dispatcher: Dispatcher,
     emiter: EventBus,
 }
 
-impl<'a> Context for EventContext<'a> {}
+impl Context for EventContext {}
 
-impl<'a> BorrowFromContext<'a, Syzygy> for EventContext<'a> {
-    fn from_context(cx: &'a Syzygy) -> Self {
+impl<C> FromContext<C> for EventContext
+where
+    C: ModelAccess + ResourceAccess + DispatchEffect + EmitEvent,
+{
+    fn from_context(cx: &C) -> Self {
         Self {
-            models: cx.models.clone(),
-            resources: cx.resources.clone(),
-            dispatcher: cx.dispatcher.clone(),
-            emiter: cx.event_bus.clone(),
+            models: <C as ModelAccess>::models(cx).clone(),
+            resources: <C as ResourceAccess>::resources(cx).clone(),
+            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
+            emiter: <C as EmitEvent>::event_bus(cx).clone(),
         }
     }
 }
 
-impl<'a> ModelAccess for EventContext<'a> {
+impl ModelAccess for EventContext {
     fn models(&self) -> &Models {
         &self.models
     }
 }
 
-impl<'a> ResourceAccess for EventContext<'a> {
+impl ResourceAccess for EventContext {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<'a> DispatchEffect<'a> for EventContext<'a> {
-    fn dispatcher(&self) -> &Dispatcher<'a> {
+impl DispatchEffect for EventContext {
+    fn dispatcher(&self) -> &Dispatcher {
         &self.dispatcher
     }
 }
 
-impl<'a> EmitEvent for EventContext<'a> {
+impl EmitEvent for EventContext {
     fn event_bus(&self) -> &EventBus {
         &self.emiter
     }

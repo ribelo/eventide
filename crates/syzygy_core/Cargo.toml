@@ -20,6 +20,7 @@ crossbeam-channel = { workspace = true }
 downcast-rs = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
+generational-box = { workspace = true }
 
 [lints.clippy]
 all = { level = "warn", priority = -2 }

@@ -1,19 +1,19 @@
 use crate::{
-    context::{Context, ContextExecutor, BorrowFromContext},
+    context::{Context, ContextExecutor},
     syzygy::Syzygy,
 };
 
 use crossbeam_channel::{Receiver, Sender};
 
-pub trait Effect<'a>: Send + Sync + 'static {
-    fn handle(self: Box<Self>, syzygy: &'a Syzygy);
+pub trait Effect: Send + Sync + 'static {
+    fn handle(self: Box<Self>, syzygy: &Syzygy);
 }
 
-impl<'a, F> Effect<'a> for F
+impl<F> Effect for F
 where
-    F: FnOnce(&'a Syzygy) + Send + Sync + 'static,
+    F: FnOnce(&Syzygy) + Send + Sync + 'static,
 {
-    fn handle(self: Box<Self>, syzygy: &'a Syzygy) {
+    fn handle(self: Box<Self>, syzygy: &Syzygy) {
         (*self)(syzygy);
     }
 }
@@ -27,40 +27,40 @@ pub enum DispatchError {
 }
 
 #[derive(Debug, Clone)]
-pub struct Dispatcher<'a> {
-    pub(crate) tx: Sender<Box<dyn Effect<'a>>>,
-    pub(crate) rx: Receiver<Box<dyn Effect<'a>>>,
+pub struct Dispatcher {
+    pub(crate) tx: Sender<Box<dyn Effect>>,
+    pub(crate) rx: Receiver<Box<dyn Effect>>,
 }
 
-impl<'a> Default for Dispatcher<'a> {
+impl Default for Dispatcher {
     fn default() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         Self { tx, rx }
     }
 }
 
-impl<'a> Dispatcher<'a> {
+impl Dispatcher {
     pub fn dispatch<H, T>(&self, effect: H) -> Result<(), DispatchError>
         where
-            H: ContextExecutor<'a, Syzygy, T, ()> + Send + Sync + 'static,
+            H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
         {
-            let effect = Box::new(move |syzygy: &'a Syzygy| effect.call(syzygy));
+            let effect = Box::new(move |syzygy: &Syzygy| effect.call(syzygy));
             self.tx
                 .send(effect)
                 .map_err(|_| DispatchError::ChannelClosed)
         }
 
     #[must_use]
-    pub fn pop(&self) -> Option<Box<dyn Effect<'a>>> {
+    pub fn pop(&self) -> Option<Box<dyn Effect>> {
         self.rx.try_recv().ok()
     }
 }
 
-pub trait DispatchEffect<'a>: Sized + Context {
-    fn dispatcher(&self) -> &'a Dispatcher;
+pub trait DispatchEffect: Sized + Context {
+    fn dispatcher(&self) -> &Dispatcher;
     fn dispatch<H, T>(&self, effect: H) -> Result<(), DispatchError>
         where
-            H: ContextExecutor<'a, Syzygy, T, ()> + Send + Sync + 'static,
+            H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
         {
             self.dispatcher().dispatch(effect)
         }

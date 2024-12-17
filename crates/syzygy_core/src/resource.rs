@@ -7,7 +7,7 @@ use std::{
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use crate::context::{Context, BorrowFromContext};
+use crate::context::{Context, FromContext};
 
 #[derive(Debug)]
 pub struct ResourceBox(RwLock<Box<dyn Any + Send + Sync + 'static>>);
@@ -88,12 +88,12 @@ pub struct Resource<T>(pub T)
 where
     T: Clone + Send + Sync + 'static;
 
-impl<'a, C, T> BorrowFromContext<'a, C> for Resource<T>
+impl<C, T> FromContext<C> for Resource<T>
 where
     C: Context + ResourceAccess,
     T: Clone + Send + Sync + 'static,
 {
-    fn from_context(context: &'a C) -> Self {
+    fn from_context(context: &C) -> Self {
         context.resource::<T>().into()
     }
 }

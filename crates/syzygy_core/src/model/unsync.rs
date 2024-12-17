@@ -1,23 +1,16 @@
 use std::{
     any::{Any, TypeId},
-    cell::{Ref, RefCell, RefMut},
+    cell::{Ref, RefMut},
+    fmt,
     ops::Deref,
-    rc::Rc,
 };
 
+use generational_box::{
+    AnyStorage, GenerationalBox, GenerationalRef, GenerationalRefMut, Owner, UnsyncStorage,
+};
 use rustc_hash::FxHashMap;
 
-use crate::context::{Context, BorrowFromContext};
-
-#[derive(Debug)]
-pub struct ModelBox(Rc<RefCell<Box<dyn Any + 'static>>>);
-
-impl Deref for ModelBox {
-    type Target = RefCell<Box<dyn Any + 'static>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+use crate::context::{Context, FromContext};
 
 #[derive(Debug, Default)]
 pub struct ModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
@@ -33,23 +26,31 @@ impl ModelsBuilder {
     }
     #[must_use]
     pub fn build(self) -> Models {
-        let models = self
+        let owner = UnsyncStorage::owner();
+        let models: FxHashMap<_, _> = self
             .0
             .into_iter()
-            .map(|(id, model)| (id, ModelBox(Rc::new(RefCell::new(model)))))
+            .map(|(id, model)| (id, owner.insert(model)))
             .collect();
 
-        Models(Rc::new(models))
+        Models {
+            _owner: owner,
+            models,
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Models(Rc<FxHashMap<TypeId, ModelBox>>);
+#[derive(Clone)]
+pub struct Models {
+    _owner: Owner,
+    models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any>>>,
+}
 
-impl Deref for Models {
-    type Target = Rc<FxHashMap<TypeId, ModelBox>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl fmt::Debug for Models {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Models")
+            .field("models", &self.models)
+            .finish_non_exhaustive()
     }
 }
 
@@ -60,45 +61,45 @@ impl Models {
     }
 
     #[must_use]
-    pub fn get<T>(&self) -> Option<Ref<T>>
+    pub fn try_get<M>(&self) -> Option<GenerationalRef<Ref<'static, M>>>
     where
-        T: 'static,
+        M: 'static,
     {
-        let ty = TypeId::of::<T>();
-        self.0.get(&ty).map(|model| {
-            Ref::map(model.borrow(), |boxed_value| {
-                boxed_value.downcast_ref::<T>().expect("Type mismatch")
-            })
-        })
+        let ty = TypeId::of::<M>();
+        let gbox = self.models.get(&ty)?;
+        let boxed_value = gbox.read();
+        Some(UnsyncStorage::map(boxed_value, |any| unsafe {
+            any.downcast_ref_unchecked::<M>()
+        }))
     }
 
     #[must_use]
-    pub fn get_mut<T>(&self) -> Option<RefMut<T>>
+    pub fn try_get_mut<M>(&self) -> Option<GenerationalRefMut<RefMut<'static, M>>>
     where
-        T: 'static,
+        M: 'static,
     {
-        let ty = TypeId::of::<T>();
-        self.0.get(&ty).map(|model| {
-            RefMut::map(model.borrow_mut(), |boxed_value| {
-                boxed_value.downcast_mut::<T>().expect("Type mismatch")
-            })
-        })
+        let ty = TypeId::of::<M>();
+        let gbox = self.models.get(&ty)?;
+        let boxed_value = gbox.write();
+        Some(UnsyncStorage::map_mut(boxed_value, |any| unsafe {
+            any.downcast_mut_unchecked::<M>()
+        }))
     }
 }
 
 pub trait ModelAccess: Context {
     fn models(&self) -> &Models;
-    fn model<M>(&self) -> Ref<M>
+    fn model<M>(&self) -> GenerationalRef<Ref<'static, M>>
     where
         M: 'static,
     {
-        self.models().get::<M>().unwrap()
+        self.models().try_get::<M>().unwrap()
     }
-    fn try_model<M>(&self) -> Option<Ref<M>>
+    fn try_model<M>(&self) -> Option<GenerationalRef<Ref<'static, M>>>
     where
         M: 'static,
     {
-        self.models().get::<M>()
+        self.models().try_get::<M>()
     }
     fn query<M, F, R>(&self, f: F) -> R
     where
@@ -111,17 +112,17 @@ pub trait ModelAccess: Context {
 }
 
 pub trait ModelModify: ModelAccess {
-    fn model_mut<M>(&self) -> RefMut<M>
+    fn model_mut<M>(&self) -> GenerationalRefMut<RefMut<'static, M>>
     where
         M: 'static,
     {
-        self.models().get_mut::<M>().unwrap()
+        self.models().try_get_mut::<M>().unwrap()
     }
-    fn try_model_mut<M>(&self) -> Option<RefMut<M>>
+    fn try_model_mut<M>(&self) -> Option<GenerationalRefMut<RefMut<'static, M>>>
     where
         M: 'static,
     {
-        self.models().get_mut::<M>()
+        self.models().try_get_mut::<M>()
     }
     fn update<M, F>(&self, mut f: F)
     where
@@ -132,40 +133,40 @@ pub trait ModelModify: ModelAccess {
     }
 }
 
-pub struct Model<'a, T>(pub Ref<'a, T>);
+pub struct Model<T: 'static>(pub GenerationalRef<Ref<'static, T>>);
 
-impl<'a, T> Deref for Model<'a, T> {
+impl<T> Deref for Model<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<'a, C, T> BorrowFromContext<'a, C> for Model<'a, T>
+impl<C, T> FromContext<C> for Model<T>
 where
     C: Context + ModelAccess,
     T: 'static,
 {
-    fn from_context(context: &'a C) -> Self {
+    fn from_context(context: &C) -> Self {
         Self(context.model::<T>())
     }
 }
 
-pub struct ModelMut<'a, T>(pub RefMut<'a, T>);
+pub struct ModelMut<T: 'static>(pub GenerationalRefMut<RefMut<'static, T>>);
 
-impl<'a, T> Deref for ModelMut<'a, T> {
+impl<T> Deref for ModelMut<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<'a, C, T> BorrowFromContext<'a, C> for ModelMut<'a, T>
+impl<C, T> FromContext<C> for ModelMut<T>
 where
     C: Context + ModelModify,
     T: 'static,
 {
-    fn from_context(context: &'a C) -> Self {
+    fn from_context(context: &C) -> Self {
         Self(context.model_mut::<T>())
     }
 }

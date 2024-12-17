@@ -4,10 +4,10 @@ pub mod r#async;
 pub mod event;
 pub mod thread;
 
-pub trait Context: Sized + Clone  {
-    fn execute<'a, H, T, R>(&'a self, h: H) -> R
+pub trait Context: Sized + Clone + 'static  {
+    fn execute<H, T, R>(&self, h: H) -> R
         where
-            H: ContextExecutor<'a, Self, T, R>,
+            H: ContextExecutor<Self, T, R>,
         {
             h.call(self)
         }
@@ -20,39 +20,32 @@ where
     fn from_context(cx: &C) -> Self;
 }
 
-pub trait BorrowFromContext<'a, C>
+pub trait ContextExecutor<C, T, R>
 where
     C: Context,
 {
-    fn from_context(cx: &'a C) -> Self;
+    fn call(self, cx: &C) -> R;
 }
 
-pub trait ContextExecutor<'a, C, T, R>
-where
-    C: Context,
-{
-    fn call(self, cx: &'a C) -> R;
-}
-
-impl<'a, C, F, R> ContextExecutor<'a, C, (), R> for F
+impl<C, F, R> ContextExecutor<C, (), R> for F
 where
     C: Context,
     F: FnOnce() -> R,
 {
-    fn call(self, _cx: &'a C) -> R {
+    fn call(self, _cx: &C) -> R {
         (self)()
     }
 }
 
 macro_rules! impl_context_executor {
     ($($t:ident),*) => {
-        impl<'a, C, F, $($t,)* R> ContextExecutor<'a, C, ($($t,)*), R> for F
+        impl<C, F, $($t,)* R> ContextExecutor<C, ($($t,)*), R> for F
         where
             C: Context,
             F: FnOnce($($t,)*) -> R,
-            $($t: BorrowFromContext<'a, C>,)*
+            $($t: FromContext<C>,)*
         {
-            fn call(self, cx: &'a C) -> R {
+            fn call(self, cx: &C) -> R {
                 (self)($($t::from_context(cx),)*)
             }
         }

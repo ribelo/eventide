@@ -12,9 +12,9 @@ use crate::context::{thread::ThreadContext, Context, FromContext};
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread<'a>: Context
+pub trait SpawnThread: Context
 where
-    ThreadContext<'a>: FromContext<Self>,
+    ThreadContext: FromContext<Self>,
 {
     fn spawn<F, R>(&self, f: F) -> crossbeam_channel::Receiver<R>
     where

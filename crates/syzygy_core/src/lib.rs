@@ -8,7 +8,7 @@ pub mod spawn;
 pub mod syzygy;
 
 pub mod prelude {
-    pub use crate::context::{Context, BorrowFromContext};
+    pub use crate::context::{Context, FromContext};
     pub use crate::event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe};
     pub use crate::model::{ModelAccess, ModelModify, Models, Model, ModelMut};
     pub use crate::resource::{ResourceAccess, Resources};
