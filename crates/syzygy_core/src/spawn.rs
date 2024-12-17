@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-use crate::context::{thread::ThreadContext, Context, FromContext};
+#[cfg(feature = "async")]
+use crate::context::AsyncContextExecutor;
+use crate::context::{thread::ThreadContext, Context, ContextExecutor, FromContext};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
@@ -16,15 +18,15 @@ pub trait SpawnThread: Context
 where
     ThreadContext: FromContext<Self>,
 {
-    fn spawn<F, R>(&self, f: F) -> crossbeam_channel::Receiver<R>
+    fn spawn<H, T, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        F: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
+        H: ContextExecutor<ThreadContext, T, R> + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
         std::thread::spawn(move || {
-            let result = f(ctx);
+            let result = handler.call(&ctx);
             let _ = tx.send(result);
         });
 
@@ -49,17 +51,17 @@ where
     AsyncContext: FromContext<Self>,
 {
     fn tokio_rt(&self) -> Arc<tokio::runtime::Runtime>;
-    fn spawn_task<F, Fut, R>(&self, f: F) -> tokio::sync::oneshot::Receiver<R>
+    fn spawn_task<H, T, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        F: FnOnce(AsyncContext) -> Fut + Send + Sync + 'static,
+        H: AsyncContextExecutor<AsyncContext, T, Fut, R> + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let ctx = AsyncContext::from_context(self);
 
-        self.tokio_rt().spawn(async {
-            let result = f(ctx).await;
+        self.tokio_rt().spawn(async move {
+            let result = handler.call(&ctx).await;
             let _ = tx.send(result);
         });
 

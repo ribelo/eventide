@@ -46,10 +46,10 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            effect_bus: <C as DispatchEffect>::effect_bus(cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(cx),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
+            rayon_pool: cx.rayon_pool(),
         }
     }
 }

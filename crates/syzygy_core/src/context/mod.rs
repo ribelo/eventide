@@ -1,16 +1,17 @@
+use std::future::Future;
 
 #[cfg(feature = "async")]
 pub mod r#async;
 pub mod event;
 pub mod thread;
 
-pub trait Context: Sized + Clone + 'static  {
+pub trait Context: Sized + Clone + 'static {
     fn execute<H, T, R>(&self, h: H) -> R
-        where
-            H: ContextExecutor<Self, T, R>,
-        {
-            h.call(self)
-        }
+    where
+        H: ContextExecutor<Self, T, R>,
+    {
+        h.call(self)
+    }
 }
 
 pub trait FromContext<C>
@@ -65,10 +66,75 @@ impl_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
 impl_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
 impl_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
 
+#[cfg(feature = "async")]
+pub trait AsyncContextExecutor<C, T, Fut, R>
+where
+    C: Context,
+    Fut: Future<Output = R>,
+{
+    fn call(self, cx: &C) -> Fut;
+}
+
+#[cfg(feature = "async")]
+impl<C, F, Fut, R> AsyncContextExecutor<C, (), Fut, R> for F
+where
+    C: Context,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = R>,
+{
+    fn call(self, _cx: &C) -> Fut {
+        (self)()
+    }
+}
+
+#[cfg(feature = "async")]
+macro_rules! impl_async_context_executor {
+    ($($t:ident),*) => {
+        impl<C, F, Fut, $($t,)* R> AsyncContextExecutor<C, ($($t,)*), Fut, R> for F
+        where
+            C: Context,
+            F: FnOnce($($t,)*) -> Fut,
+            Fut: Future<Output = R>,
+            $($t: FromContext<C>,)*
+        {
+            fn call(self, cx: &C) -> Fut {
+                (self)($($t::from_context(cx),)*)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+#[cfg(feature = "async")]
+impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+
 #[cfg(test)]
 mod tests {
+    use crate::effect_bus::DispatchEffect;
     use crate::model::{Model, ModelMut};
     use crate::resource::Resource;
+    use crate::spawn::{SpawnAsync, SpawnThread};
     use crate::{context::Context, syzygy::SyzygyBuilder};
 
     #[test]
@@ -90,10 +156,26 @@ mod tests {
             .resource(resource)
             .build();
 
+        syzygy.execute(|| println!("nop"));
         syzygy.execute(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
         syzygy.execute(|ModelMut(mut model): ModelMut<TestModel>| model.counter += 1);
         syzygy.execute(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
-        syzygy.execute(|Resource(resource): Resource<TestResource>| println!("name is {}", resource.name));
+        syzygy.execute(|Resource(resource): Resource<TestResource>| {
+            println!("name is {}", resource.name);
+        });
+
+        syzygy.dispatch(|| println!("empty dispatch")).unwrap();
+
+        syzygy
+            .dispatch(|Model(model): Model<TestModel>| {
+                println!("counter from dispatch is {}", model.counter);
+            })
+            .unwrap();
+
+        syzygy.spawn(|| println!("Hello from thread"));
+        syzygy.spawn_task(|| async { println!("Hello from async") });
+
+        syzygy.handle_effects();
 
         syzygy.execute(|| println!("Hello, world!"));
     }

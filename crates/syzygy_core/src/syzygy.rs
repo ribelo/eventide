@@ -239,7 +239,7 @@ where
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
             tokio_rt: cx.tokio_rt(),
-            rayon_pool: cx.rayon_pool().clone(),
+            rayon_pool: cx.rayon_pool(),
         }
     }
 }
@@ -680,7 +680,7 @@ mod tests {
 
         // Test spawning a thread that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn(move |_| {
+        let rx = syzygy.spawn(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -696,7 +696,7 @@ mod tests {
         let threads: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.spawn(move |_cx| {
+                syzygy.spawn(move || {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })
@@ -726,7 +726,7 @@ mod tests {
 
         // Test spawning a task that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn_task(move |_| async move {
+        let rx = syzygy.spawn_task(move || async move {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -742,7 +742,7 @@ mod tests {
         let tasks: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.spawn_task(move |_cx| async move {
+                syzygy.spawn_task(move || async move {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })
