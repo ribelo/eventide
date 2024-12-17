@@ -1,5 +1,5 @@
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher},
+    effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
     model::{ModelAccess, Models},
     resource::{ResourceAccess, Resources},
@@ -11,8 +11,8 @@ use super::{Context, FromContext};
 pub struct EventContext {
     models: Models,
     resources: Resources,
-    dispatcher: Dispatcher,
-    emiter: EventBus,
+    effect_bus: EffectBus,
+    event_bus: EventBus,
 }
 
 impl Context for EventContext {}
@@ -23,10 +23,10 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            models: <C as ModelAccess>::models(cx).clone(),
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
-            emiter: <C as EmitEvent>::event_bus(cx).clone(),
+            models: cx.models().clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
         }
     }
 }
@@ -44,13 +44,13 @@ impl ResourceAccess for EventContext {
 }
 
 impl DispatchEffect for EventContext {
-    fn dispatcher(&self) -> &Dispatcher {
-        &self.dispatcher
+    fn effect_bus(&self) -> &EffectBus {
+        &self.effect_bus
     }
 }
 
 impl EmitEvent for EventContext {
     fn event_bus(&self) -> &EventBus {
-        &self.emiter
+        &self.event_bus
     }
 }

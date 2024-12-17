@@ -1,11 +1,20 @@
 // #[cfg(feature = "sync")]
+#[cfg(feature = "sync")]
+mod sync;
 #[cfg(feature = "unsync")]
 mod unsync;
-// #[cfg(feature = "sync")]
-// mod sync;
+
+#[cfg(all(feature = "sync", feature = "unsync"))]
+compile_error!("Features 'sync' and 'unsync' cannot be enabled simultaneously");
 
 #[cfg(feature = "unsync")]
-pub use unsync::{Model, ModelAccess, ModelModify, ModelMut, Models, ModelsBuilder};
+pub use unsync::{
+    UnsyncModel as Model, UnsyncModelAccess as ModelAccess, UnsyncModelModify as ModelModify,
+    UnsyncModelMut as ModelMut, UnsyncModels as Models, UnsyncModelsBuilder as ModelsBuilder,
+};
 
-// #[cfg(feature = "sync")]
-// pub use sync::{SyncModelAccess, SyncModelMut, SyncModels, SyncModelsBuilder};
+#[cfg(feature = "sync")]
+pub use sync::{
+    SyncModel as Model, SyncModelAccess as ModelAccess, SyncModelModify as ModelModify,
+    SyncModelMut as ModelMut, SyncModels as Models, SyncModelsBuilder as ModelsBuilder,
+};

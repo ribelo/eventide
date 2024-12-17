@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher},
+    effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
 };
@@ -17,7 +17,7 @@ use super::{Context, FromContext};
 #[derive(Clone)]
 pub struct ThreadContext {
     resources: Resources,
-    dispatcher: Dispatcher,
+    effect_bus: EffectBus,
     event_bus: EventBus,
     #[cfg(feature = "parallel")]
     rayon_pool: Arc<rayon::ThreadPool>,
@@ -32,9 +32,9 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
         }
     }
 }
@@ -46,8 +46,8 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
             resources: <C as ResourceAccess>::resources(cx).clone(),
+            effect_bus: <C as DispatchEffect>::effect_bus(cx).clone(),
             event_bus: <C as EmitEvent>::event_bus(cx).clone(),
             rayon_pool: <C as SpawnParallel>::rayon_pool(cx),
         }
@@ -61,8 +61,8 @@ impl ResourceAccess for ThreadContext {
 }
 
 impl DispatchEffect for ThreadContext {
-    fn dispatcher(&self) -> &Dispatcher {
-        &self.dispatcher
+    fn effect_bus(&self) -> &EffectBus {
+        &self.effect_bus
     }
 }
 

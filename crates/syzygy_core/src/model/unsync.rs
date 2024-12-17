@@ -13,9 +13,9 @@ use rustc_hash::FxHashMap;
 use crate::context::{Context, FromContext};
 
 #[derive(Debug, Default)]
-pub struct ModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
+pub struct UnsyncModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
 
-impl ModelsBuilder {
+impl UnsyncModelsBuilder {
     #[must_use]
     pub fn insert<M>(mut self, model: M) -> Self
     where
@@ -25,7 +25,7 @@ impl ModelsBuilder {
         self
     }
     #[must_use]
-    pub fn build(self) -> Models {
+    pub fn build(self) -> UnsyncModels {
         let owner = UnsyncStorage::owner();
         let models: FxHashMap<_, _> = self
             .0
@@ -33,7 +33,7 @@ impl ModelsBuilder {
             .map(|(id, model)| (id, owner.insert(model)))
             .collect();
 
-        Models {
+        UnsyncModels {
             _owner: owner,
             models,
         }
@@ -41,12 +41,12 @@ impl ModelsBuilder {
 }
 
 #[derive(Clone)]
-pub struct Models {
+pub struct UnsyncModels {
     _owner: Owner,
     models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any>>>,
 }
 
-impl fmt::Debug for Models {
+impl fmt::Debug for UnsyncModels {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Models")
             .field("models", &self.models)
@@ -54,10 +54,10 @@ impl fmt::Debug for Models {
     }
 }
 
-impl Models {
+impl UnsyncModels {
     #[must_use]
-    pub fn builder() -> ModelsBuilder {
-        ModelsBuilder::default()
+    pub fn builder() -> UnsyncModelsBuilder {
+        UnsyncModelsBuilder::default()
     }
 
     #[must_use]
@@ -68,7 +68,9 @@ impl Models {
         let ty = TypeId::of::<M>();
         let gbox = self.models.get(&ty)?;
         let boxed_value = gbox.read();
-        Some(UnsyncStorage::map(boxed_value, |any| unsafe {
+        Some(UnsyncStorage::map(boxed_value, |any|
+            // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
+            unsafe {
             any.downcast_ref_unchecked::<M>()
         }))
     }
@@ -81,14 +83,16 @@ impl Models {
         let ty = TypeId::of::<M>();
         let gbox = self.models.get(&ty)?;
         let boxed_value = gbox.write();
-        Some(UnsyncStorage::map_mut(boxed_value, |any| unsafe {
+        Some(UnsyncStorage::map_mut(boxed_value, |any|
+            // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
+            unsafe {
             any.downcast_mut_unchecked::<M>()
         }))
     }
 }
 
-pub trait ModelAccess: Context {
-    fn models(&self) -> &Models;
+pub trait UnsyncModelAccess: Context {
+    fn models(&self) -> &UnsyncModels;
     fn model<M>(&self) -> GenerationalRef<Ref<'static, M>>
     where
         M: 'static,
@@ -111,7 +115,7 @@ pub trait ModelAccess: Context {
     }
 }
 
-pub trait ModelModify: ModelAccess {
+pub trait UnsyncModelModify: UnsyncModelAccess {
     fn model_mut<M>(&self) -> GenerationalRefMut<RefMut<'static, M>>
     where
         M: 'static,
@@ -133,18 +137,18 @@ pub trait ModelModify: ModelAccess {
     }
 }
 
-pub struct Model<T: 'static>(pub GenerationalRef<Ref<'static, T>>);
+pub struct UnsyncModel<T: 'static>(pub GenerationalRef<Ref<'static, T>>);
 
-impl<T> Deref for Model<T> {
+impl<T> Deref for UnsyncModel<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<C, T> FromContext<C> for Model<T>
+impl<C, T> FromContext<C> for UnsyncModel<T>
 where
-    C: Context + ModelAccess,
+    C: Context + UnsyncModelAccess,
     T: 'static,
 {
     fn from_context(context: &C) -> Self {
@@ -152,18 +156,18 @@ where
     }
 }
 
-pub struct ModelMut<T: 'static>(pub GenerationalRefMut<RefMut<'static, T>>);
+pub struct UnsyncModelMut<T: 'static>(pub GenerationalRefMut<RefMut<'static, T>>);
 
-impl<T> Deref for ModelMut<T> {
+impl<T> Deref for UnsyncModelMut<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<C, T> FromContext<C> for ModelMut<T>
+impl<C, T> FromContext<C> for UnsyncModelMut<T>
 where
-    C: Context + ModelModify,
+    C: Context + UnsyncModelModify,
     T: 'static,
 {
     fn from_context(context: &C) -> Self {

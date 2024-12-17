@@ -19,7 +19,7 @@ where
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
+pub enum EffectError {
     #[error("Channel closed")]
     ChannelClosed,
     #[error("Runtime stopped")]
@@ -27,27 +27,27 @@ pub enum DispatchError {
 }
 
 #[derive(Debug, Clone)]
-pub struct Dispatcher {
+pub struct EffectBus {
     pub(crate) tx: Sender<Box<dyn Effect>>,
     pub(crate) rx: Receiver<Box<dyn Effect>>,
 }
 
-impl Default for Dispatcher {
+impl Default for EffectBus {
     fn default() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         Self { tx, rx }
     }
 }
 
-impl Dispatcher {
-    pub fn dispatch<H, T>(&self, effect: H) -> Result<(), DispatchError>
+impl EffectBus {
+    pub fn dispatch<H, T>(&self, effect: H) -> Result<(), EffectError>
         where
             H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
         {
             let effect = Box::new(move |syzygy: &Syzygy| effect.call(syzygy));
             self.tx
                 .send(effect)
-                .map_err(|_| DispatchError::ChannelClosed)
+                .map_err(|_| EffectError::ChannelClosed)
         }
 
     #[must_use]
@@ -57,11 +57,11 @@ impl Dispatcher {
 }
 
 pub trait DispatchEffect: Sized + Context {
-    fn dispatcher(&self) -> &Dispatcher;
-    fn dispatch<H, T>(&self, effect: H) -> Result<(), DispatchError>
+    fn effect_bus(&self) -> &EffectBus;
+    fn dispatch<H, T>(&self, effect: H) -> Result<(), EffectError>
         where
             H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
         {
-            self.dispatcher().dispatch(effect)
+            self.effect_bus().dispatch(effect)
         }
 }

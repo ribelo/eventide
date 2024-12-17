@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    dispatch::{DispatchEffect, Dispatcher},
+    effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
     spawn::SpawnAsync,
@@ -12,7 +12,7 @@ use super::{Context, FromContext};
 #[derive(Debug, Clone)]
 pub struct AsyncContext {
     resources: Resources,
-    dispatcher: Dispatcher,
+    effect_bus: EffectBus,
     event_bus: EventBus,
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
@@ -25,10 +25,10 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(cx),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
+            tokio_rt: cx.tokio_rt(),
         }
     }
 }
@@ -40,8 +40,8 @@ impl ResourceAccess for AsyncContext {
 }
 
 impl DispatchEffect for AsyncContext {
-    fn dispatcher(&self) -> &Dispatcher {
-        &self.dispatcher
+    fn effect_bus(&self) -> &EffectBus {
+        &self.effect_bus
     }
 }
 

@@ -1,9 +1,10 @@
 use std::{
     any::{Any, TypeId},
+    fmt,
     ops::Deref,
-    sync::Arc,
 };
 
+use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
@@ -33,23 +34,31 @@ impl ResourcesBuilder {
     }
     #[must_use]
     pub fn build(self) -> Resources {
-        let resources = self
+        let owner = SyncStorage::owner();
+        let models: FxHashMap<_, _> = self
             .0
             .into_iter()
-            .map(|(id, resource)| (id, ResourceBox(RwLock::new(resource))))
+            .map(|(id, resource)| (id, owner.insert(resource)))
             .collect();
 
-        Resources(Arc::new(resources))
+        Resources {
+            _owner: owner,
+            models,
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Resources(Arc<FxHashMap<TypeId, ResourceBox>>);
+#[derive(Clone)]
+pub struct Resources {
+    _owner: Owner<SyncStorage>,
+    models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any + Send + Sync>, SyncStorage>>,
+}
 
-impl Deref for Resources {
-    type Target = Arc<FxHashMap<TypeId, ResourceBox>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl fmt::Debug for Resources {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resources")
+            .field("models", &self.models)
+            .finish_non_exhaustive()
     }
 }
 
@@ -60,7 +69,7 @@ impl Resources {
         T: Clone + Send + Sync + 'static,
     {
         let ty = TypeId::of::<T>();
-        self.0.get(&ty).map(|resource| {
+        self.models.get(&ty).map(|resource| {
             let boxed_value = resource.read();
             // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
             unsafe { boxed_value.downcast_ref_unchecked::<T>().clone() }

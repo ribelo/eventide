@@ -1,178 +1,176 @@
-// use std::{
-//     any::{Any, TypeId},
-//     ops::Deref,
-//     sync::Arc,
-// };
+use std::{
+    any::{Any, TypeId},
+    fmt,
+    ops::Deref,
+};
 
-// use parking_lot::{
-//     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-// };
-// use rustc_hash::FxHashMap;
+use generational_box::{
+    AnyStorage, GenerationalBox, GenerationalRef, GenerationalRefMut, Owner, SyncStorage,
+};
+use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
+use rustc_hash::FxHashMap;
 
-// use crate::context::{BorrowFromContext, Context, FromContext};
+use crate::context::{Context, FromContext};
 
-// #[derive(Debug)]
-// pub struct ModelBox(RwLock<Box<dyn Any + 'static>>);
+#[derive(Debug, Default)]
+pub struct SyncModelsBuilder(FxHashMap<TypeId, Box<dyn Any + Send + Sync>>);
 
-// impl ModelBox {
-//     pub fn downcast_ref<T: 'static>(&self) -> MappedRwLockReadGuard<'_, T> {
-//         RwLockReadGuard::map(self.0.read(), |boxed_value| {
-//             boxed_value.downcast_ref::<T>().expect("Type mismatch")
-//         })
-//     }
-//     pub fn downcast_mut<T: 'static>(&self) -> MappedRwLockWriteGuard<'_, T> {
-//         RwLockWriteGuard::map(self.0.write(), |boxed_value| unsafe {
-//             boxed_value.downcast_mut_unchecked::<T>()
-//         })
-//     }
-// }
+impl SyncModelsBuilder {
+    #[must_use]
+    pub fn insert<M>(mut self, model: M) -> Self
+    where
+        M: Send + Sync + 'static,
+    {
+        self.0.insert(TypeId::of::<M>(), Box::new(model));
+        self
+    }
+    #[must_use]
+    pub fn build(self) -> SyncModels {
+        let owner = SyncStorage::owner();
+        let models: FxHashMap<_, _> = self
+            .0
+            .into_iter()
+            .map(|(id, model)| (id, owner.insert(model)))
+            .collect();
 
-// impl Deref for ModelBox {
-//     type Target = RwLock<Box<dyn Any + 'static>>;
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
+        SyncModels {
+            _owner: owner,
+            models,
+        }
+    }
+}
 
-// #[derive(Debug, Default)]
-// pub struct ModelsBuilder(FxHashMap<TypeId, Box<dyn Any>>);
+#[derive(Clone)]
+pub struct SyncModels {
+    _owner: Owner<SyncStorage>,
+    models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any + Send + Sync>, SyncStorage>>,
+}
 
-// impl ModelsBuilder {
-//     #[must_use]
-//     pub fn insert<M>(mut self, model: M) -> Self
-//     where
-//         M: 'static,
-//     {
-//         self.0.insert(TypeId::of::<M>(), Box::new(model));
-//         self
-//     }
-//     #[must_use]
-//     pub fn build(self) -> Models {
-//         let models = self
-//             .0
-//             .into_iter()
-//             .map(|(id, model)| (id, ModelBox(RwLock::new(model))))
-//             .collect();
+impl fmt::Debug for SyncModels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Models")
+            .field("models", &self.models)
+            .finish_non_exhaustive()
+    }
+}
 
-//         Models(Arc::new(models))
-//     }
-// }
+impl SyncModels {
+    #[must_use]
+    pub fn builder() -> SyncModelsBuilder {
+        SyncModelsBuilder::default()
+    }
 
-// #[derive(Debug, Clone)]
-// pub struct Models(Arc<FxHashMap<TypeId, ModelBox>>);
+    #[must_use]
+    pub fn try_get<M>(&self) -> Option<GenerationalRef<MappedRwLockReadGuard<'static, M>>>
+    where
+        M: 'static,
+    {
+        let ty = TypeId::of::<M>();
+        let gbox = self.models.get(&ty)?;
+        let boxed_value = gbox.read();
+        Some(SyncStorage::map(boxed_value, |any|
+            // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
+            unsafe {
+            any.downcast_ref_unchecked::<M>()
+        }))
+    }
 
-// impl Deref for Models {
-//     type Target = Arc<FxHashMap<TypeId, ModelBox>>;
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
+    #[must_use]
+    pub fn try_get_mut<M>(&self) -> Option<GenerationalRefMut<MappedRwLockWriteGuard<'static, M>>>
+    where
+        M: 'static,
+    {
+        let ty = TypeId::of::<M>();
+        let gbox = self.models.get(&ty)?;
+        let boxed_value = gbox.write();
+        Some(SyncStorage::map_mut(boxed_value, |any|
+            // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
+            unsafe {
+            any.downcast_mut_unchecked::<M>()
+        }))
+    }
+}
 
-// impl Models {
-//     #[must_use]
-//     pub fn builder() -> ModelsBuilder {
-//         ModelsBuilder::default()
-//     }
+pub trait SyncModelAccess: Context {
+    fn models(&self) -> &SyncModels;
+    fn model<M>(&self) -> GenerationalRef<MappedRwLockReadGuard<'static, M>>
+    where
+        M: 'static,
+    {
+        self.models().try_get::<M>().unwrap()
+    }
+    fn try_model<M>(&self) -> Option<GenerationalRef<MappedRwLockReadGuard<'static, M>>>
+    where
+        M: 'static,
+    {
+        self.models().try_get::<M>()
+    }
+    fn query<M, F, R>(&self, f: F) -> R
+    where
+        M: 'static,
+        F: FnOnce(&M) -> R,
+        R: 'static,
+    {
+        f(&self.model())
+    }
+}
 
-//     #[must_use]
-//     pub fn get<T>(&self) -> Option<MappedRwLockReadGuard<'_, T>>
-//     where
-//         T: 'static,
-//     {
-//         let ty = TypeId::of::<T>();
-//         self.0.get(&ty).map(|model| model.downcast_ref::<T>())
-//     }
+pub trait SyncModelModify: SyncModelAccess {
+    fn model_mut<M>(&self) -> GenerationalRefMut<MappedRwLockWriteGuard<'static, M>>
+    where
+        M: 'static,
+    {
+        self.models().try_get_mut::<M>().unwrap()
+    }
+    fn try_model_mut<M>(&self) -> Option<GenerationalRefMut<MappedRwLockWriteGuard<'static, M>>>
+    where
+        M: 'static,
+    {
+        self.models().try_get_mut::<M>()
+    }
+    fn update<M, F>(&self, mut f: F)
+    where
+        M: 'static,
+        F: FnMut(&mut M),
+    {
+        f(&mut self.model_mut());
+    }
+}
 
-//     #[must_use]
-//     pub fn get_mut<T>(&self) -> Option<MappedRwLockWriteGuard<'_, T>>
-//     where
-//         T: 'static,
-//     {
-//         let ty = TypeId::of::<T>();
-//         self.0.get(&ty).map(|model| model.downcast_mut::<T>())
-//     }
-// }
+pub struct SyncModel<M: 'static>(pub GenerationalRef<MappedRwLockReadGuard<'static, M>>);
 
-// pub trait ModelAccess: Context {
-//     fn models(&self) -> &Models;
-//     fn model<M>(&self) -> MappedRwLockReadGuard<'_, M>
-//     where
-//         M: 'static,
-//     {
-//         self.models().get::<M>().unwrap()
-//     }
-//     fn try_model<M>(&self) -> Option<MappedRwLockReadGuard<'_, M>>
-//     where
-//         M: 'static,
-//     {
-//         self.models().get::<M>()
-//     }
-//     fn query<M, F, R>(&self, f: F) -> R
-//     where
-//         M: 'static,
-//         F: FnOnce(&M) -> R,
-//         R: 'static,
-//     {
-//         f(&self.model())
-//     }
-// }
+impl<T> Deref for SyncModel<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
-// pub trait ModelModify: ModelAccess {
-//     fn model_mut<M>(&self) -> MappedRwLockWriteGuard<'_, M>
-//     where
-//         M: 'static,
-//     {
-//         self.models().get_mut::<M>().unwrap()
-//     }
-//     fn try_model_mut<M>(&self) -> Option<MappedRwLockWriteGuard<'_, M>>
-//     where
-//         M: 'static,
-//     {
-//         self.models().get_mut::<M>()
-//     }
-//     fn update<M, F>(&self, mut f: F)
-//     where
-//         M: 'static,
-//         F: FnMut(&mut M),
-//     {
-//         f(&mut self.model_mut());
-//     }
-// }
+impl<C, T> FromContext<C> for SyncModel<T>
+where
+    C: Context + SyncModelAccess,
+    T: 'static,
+{
+    fn from_context(context: &C) -> Self {
+        Self(context.model::<T>())
+    }
+}
 
-// pub struct Model<T: 'static>(pub MappedRwLockReadGuard<'static, T>);
+pub struct SyncModelMut<M: 'static>(pub GenerationalRefMut<MappedRwLockWriteGuard<'static, M>>);
 
-// impl<T> Deref for Model<T> {
-//     type Target = T;
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
+impl<T> Deref for SyncModelMut<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
-// impl<C, T> FromContext<C> for Model<T>
-// where
-//     C: Context + ModelAccess,
-//     T: 'static,
-// {
-//     fn from_context(context: &C) -> Self {
-//         Self(context.model::<T>())
-//     }
-// }
-
-// pub struct ModelMut<'a, T>(pub RefMut<'a, T>);
-
-// impl<'a, T> Deref for ModelMut<'a, T> {
-//     type Target = T;
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
-// impl<'a, C, T> BorrowFromContext<'a, C> for ModelMut<'a, T>
-// where
-//     C: Context + ModelModify,
-//     T: 'static,
-// {
-//     fn from_context(context: &'a C) -> Self {
-//         Self(context.model_mut::<T>())
-//     }
-// }
+impl<C, T> FromContext<C> for SyncModelMut<T>
+where
+    C: Context + SyncModelModify,
+    T: 'static,
+{
+    fn from_context(context: &C) -> Self {
+        Self(context.model_mut::<T>())
+    }
+}

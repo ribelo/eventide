@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     context::{event::EventContext, Context, FromContext},
-    dispatch::{DispatchEffect, Dispatcher},
+    effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelModify, Models, ModelsBuilder},
     resource::{ResourceAccess, Resources, ResourcesBuilder},
@@ -27,9 +27,24 @@ pub struct SyzygyBuilder {
 
 impl SyzygyBuilder {
     #[must_use]
+    #[cfg(feature = "unsync")]
     pub fn model<M>(self, model: M) -> Self
     where
         M: 'static,
+    {
+        Self {
+            models: self.models.insert(model),
+            resources: self.resources,
+            #[cfg(feature = "async")]
+            tokio_rt: self.tokio_rt,
+            #[cfg(feature = "parallel")]
+            rayon_pool: self.rayon_pool,
+        }
+    }
+    #[cfg(feature = "sync")]
+    pub fn model<M>(self, model: M) -> Self
+    where
+        M: Send + Sync + 'static,
     {
         Self {
             models: self.models.insert(model),
@@ -88,7 +103,7 @@ impl SyzygyBuilder {
         Syzygy {
             models,
             resources,
-            dispatcher: Dispatcher::default(),
+            effect_bus: EffectBus::default(),
             event_bus: EventBus::default(),
             #[cfg(feature = "async")]
             tokio_rt: Arc::new(self.tokio_rt.unwrap()),
@@ -105,7 +120,7 @@ impl SyzygyBuilder {
 pub struct Syzygy {
     pub models: Models,
     pub resources: Resources,
-    pub dispatcher: Dispatcher,
+    pub effect_bus: EffectBus,
     pub event_bus: EventBus,
     #[cfg(feature = "async")]
     pub tokio_rt: Arc<tokio::runtime::Runtime>,
@@ -115,7 +130,7 @@ pub struct Syzygy {
 
 impl Syzygy {
     pub(crate) fn handle_effects(&self) {
-        while let Some(effect) = self.dispatcher.pop() {
+        while let Some(effect) = self.effect_bus.pop() {
             effect.handle(self);
         }
     }
@@ -150,10 +165,10 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            models: <C as ModelAccess>::models(cx).clone(),
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
+            models: cx.models().clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
         }
     }
 }
@@ -172,11 +187,11 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            models: <C as ModelAccess>::models(&cx).clone(),
-            resources: <C as ResourceAccess>::resources(&cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(&cx).clone(),
+            models: cx.models().clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
+            tokio_rt: cx.tokio_rt(),
         }
     }
 }
@@ -195,11 +210,11 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            models: <C as ModelAccess>::models(&cx).clone(),
-            resources: <C as ResourceAccess>::resources(&cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(&cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(&cx).clone(),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(&cx).clone(),
+            models: cx.models().clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
+            rayon_pool: cx.rayon_pool().clone(),
         }
     }
 }
@@ -219,12 +234,12 @@ where
 {
     fn from_context(cx: &C) -> Self {
         Self {
-            models: <C as ModelAccess>::models(cx).clone(),
-            resources: <C as ResourceAccess>::resources(cx).clone(),
-            dispatcher: <C as DispatchEffect>::dispatcher(cx).clone(),
-            event_bus: <C as EmitEvent>::event_bus(cx).clone(),
-            tokio_rt: <C as SpawnAsync>::tokio_rt(cx),
-            rayon_pool: <C as SpawnParallel>::rayon_pool(cx),
+            models: cx.models().clone(),
+            resources: cx.resources().clone(),
+            effect_bus: cx.effect_bus().clone(),
+            event_bus: cx.event_bus().clone(),
+            tokio_rt: cx.tokio_rt(),
+            rayon_pool: cx.rayon_pool().clone(),
         }
     }
 }
@@ -248,8 +263,8 @@ impl ResourceAccess for Syzygy {
 }
 
 impl DispatchEffect for Syzygy {
-    fn dispatcher(&self) -> &Dispatcher {
-        &self.dispatcher
+    fn effect_bus(&self) -> &EffectBus {
+        &self.effect_bus
     }
 }
 
