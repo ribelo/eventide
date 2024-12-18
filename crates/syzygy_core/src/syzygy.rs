@@ -11,10 +11,10 @@ use crate::{
     spawn::SpawnThread,
 };
 
-#[cfg(feature = "async")]
-use crate::spawn::SpawnAsync;
 #[cfg(feature = "parallel")]
-use crate::spawn::SpawnParallel;
+use crate::spawn::{SpawnParallel, RayonPool};
+#[cfg(feature = "async")]
+use crate::spawn::{TokioHandle, SpawnAsync};
 
 #[derive(Debug, Clone, Builder)]
 pub struct Syzygy {
@@ -27,9 +27,11 @@ pub struct Syzygy {
     #[builder(skip)]
     pub event_bus: EventBus,
     #[cfg(feature = "async")]
-    pub tokio_handle: tokio::runtime::Handle,
+    #[builder(into)]
+    pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
-    pub rayon_pool: Arc<rayon::ThreadPool>,
+    #[builder(into)]
+    pub rayon_pool: RayonPool,
 }
 
 #[cfg(feature = "unsync")]
@@ -143,7 +145,7 @@ where
             resources: cx.resources().clone(),
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
-            tokio_rt: cx.tokio_rt(),
+            tokio_handle: cx.tokio_handle().clone(),
         }
     }
 }
@@ -191,7 +193,7 @@ where
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
             tokio_handle: cx.tokio_handle().clone(),
-            rayon_pool: cx.rayon_pool(),
+            rayon_pool: cx.rayon_pool().clone(),
         }
     }
 }
@@ -230,15 +232,15 @@ impl SpawnThread for Syzygy {}
 
 #[cfg(feature = "async")]
 impl SpawnAsync for Syzygy {
-    fn tokio_handle(&self) -> &tokio::runtime::Handle {
+    fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
 
 #[cfg(feature = "parallel")]
 impl SpawnParallel for Syzygy {
-    fn rayon_pool(&self) -> Arc<rayon::ThreadPool> {
-        Arc::clone(&self.rayon_pool)
+    fn rayon_pool(&self) -> &RayonPool {
+        &self.rayon_pool
     }
 }
 

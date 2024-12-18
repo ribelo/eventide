@@ -1,5 +1,6 @@
 #[cfg(feature = "async")]
 use std::future::Future;
+use std::ops::Deref;
 
 #[cfg(feature = "async")]
 pub mod r#async;
@@ -7,11 +8,11 @@ pub mod event;
 pub mod thread;
 
 pub trait Context: Sized + Clone + 'static {
-    fn execute<H, T, R>(&self, h: H) -> R
+    fn with<H, T, R>(&self, handler: H) -> R
     where
         H: ContextExecutor<Self, T, R>,
     {
-        h.call(self)
+        handler.call(self)
     }
 }
 
@@ -130,26 +131,51 @@ impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
 #[cfg(feature = "async")]
 impl_async_context_executor!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
 
+pub struct Cx<C>(pub C)
+where
+    C: Context;
+
+impl<C> Deref for Cx<C>
+where
+    C: Context,
+{
+    type Target = C;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<C> FromContext<C> for Cx<C>
+where
+    C: Context,
+{
+    fn from_context(cx: &C) -> Self {
+        Self(cx.clone())
+    }
+}
+
 #[cfg(all(feature = "async", feature = "parallel"))]
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use crate::context::Cx;
     use crate::effect_bus::DispatchEffect;
     use crate::model::{Model, ModelMut};
+    use crate::prelude::{EmitEvent, ResourceAccess};
     use crate::resource::Resource;
     use crate::spawn::{SpawnAsync, SpawnParallel, SpawnThread};
     use crate::{context::Context, syzygy::Syzygy};
 
+    pub struct TestModel {
+        counter: i32,
+    }
+    #[derive(Clone)]
+    pub struct TestResource {
+        name: String,
+    }
+
     #[test]
     fn test_context_executor() {
-        pub struct TestModel {
-            counter: i32,
-        }
-        #[derive(Clone)]
-        pub struct TestResource {
-            name: String,
-        }
 
         let model = TestModel { counter: 0 };
         let resource = TestResource {
@@ -157,7 +183,7 @@ mod tests {
         };
         let tokio_rt = tokio::runtime::Runtime::new().unwrap();
         let tokio_handle = tokio_rt.handle().clone();
-        let rayon_pool = Arc::new(rayon::ThreadPoolBuilder::new().build().unwrap());
+        let rayon_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
         let syzygy = Syzygy::builder()
             .model(model)
@@ -166,11 +192,11 @@ mod tests {
             .rayon_pool(rayon_pool)
             .build();
 
-        syzygy.execute(|| println!("nop"));
-        syzygy.execute(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
-        syzygy.execute(|ModelMut(mut model): ModelMut<TestModel>| model.counter += 1);
-        syzygy.execute(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
-        syzygy.execute(|Resource(resource): Resource<TestResource>| {
+        syzygy.with(|| println!("nop"));
+        syzygy.with(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
+        syzygy.with(|ModelMut(mut model): ModelMut<TestModel>| model.counter += 1);
+        syzygy.with(|Model(model): Model<TestModel>| println!("counter is {}", model.counter));
+        syzygy.with(|Resource(resource): Resource<TestResource>| {
             println!("name is {}", resource.name);
         });
 
@@ -188,7 +214,32 @@ mod tests {
 
         syzygy.handle_effects();
 
-        syzygy.execute(|| println!("Hello, world!"));
+        syzygy.with(|| println!("Hello, world!"));
         // std::thread::sleep(Duration::from_secs(1));
+    }
+    #[test]
+    fn test_complex_context() {
+        fn authorize<C>()
+        where
+            C: Context + SpawnAsync + DispatchEffect + EmitEvent + ResourceAccess,
+        {
+
+        }
+
+        let model = TestModel { counter: 0 };
+        let resource = TestResource {
+            name: "test".to_string(),
+        };
+        let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+        let tokio_handle = tokio_rt.handle().clone();
+        let rayon_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+
+        let syzygy = Syzygy::builder()
+            .model(model)
+            .resource(resource)
+            .tokio_handle(tokio_handle)
+            .rayon_pool(rayon_pool)
+            .build();
+        syzygy.with(|Cx(cx): Cx<Syzygy>| {})
     }
 }

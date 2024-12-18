@@ -1,6 +1,3 @@
-#[cfg(feature = "parallel")]
-use std::sync::Arc;
-
 use crate::{
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
@@ -8,7 +5,7 @@ use crate::{
 };
 
 #[cfg(feature = "parallel")]
-use crate::spawn::SpawnParallel;
+use crate::spawn::{SpawnParallel, RayonPool};
 #[cfg(not(feature = "parallel"))]
 use crate::spawn::SpawnThread;
 
@@ -20,7 +17,7 @@ pub struct ThreadContext {
     effect_bus: EffectBus,
     event_bus: EventBus,
     #[cfg(feature = "parallel")]
-    rayon_pool: Arc<rayon::ThreadPool>,
+    rayon_pool: RayonPool,
 }
 
 impl Context for ThreadContext {}
@@ -49,7 +46,7 @@ where
             resources: cx.resources().clone(),
             effect_bus: cx.effect_bus().clone(),
             event_bus: cx.event_bus().clone(),
-            rayon_pool: cx.rayon_pool(),
+            rayon_pool: cx.rayon_pool().clone(),
         }
     }
 }
@@ -74,7 +71,7 @@ impl EmitEvent for ThreadContext {
 
 #[cfg(feature = "parallel")]
 impl SpawnParallel for ThreadContext {
-    fn rayon_pool(&self) -> Arc<rayon::ThreadPool> {
-        Arc::clone(&self.rayon_pool)
+    fn rayon_pool(&self) -> &RayonPool {
+        &self.rayon_pool
     }
 }

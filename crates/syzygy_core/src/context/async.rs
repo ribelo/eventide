@@ -2,7 +2,7 @@ use crate::{
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
-    spawn::SpawnAsync,
+    spawn::{TokioHandle, SpawnAsync},
 };
 
 use super::{Context, FromContext};
@@ -12,7 +12,7 @@ pub struct AsyncContext {
     resources: Resources,
     effect_bus: EffectBus,
     event_bus: EventBus,
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: TokioHandle,
 }
 
 impl Context for AsyncContext {}
@@ -50,7 +50,7 @@ impl EmitEvent for AsyncContext {
 }
 
 impl SpawnAsync for AsyncContext {
-    fn tokio_handle(&self) -> &tokio::runtime::Handle {
+    fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
