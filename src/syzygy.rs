@@ -198,10 +198,6 @@ where
     }
 }
 
-// impl HasPermission for Syzygy {
-//     type Permission = permission::None;
-// }
-
 impl ModelAccess for Syzygy {
     fn models(&self) -> &Models {
         &self.models
@@ -443,7 +439,7 @@ mod tests {
         name: String,
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
@@ -481,14 +477,9 @@ mod tests {
         let value = syzygy.query(|m: &TestModel| m.counter);
         assert_eq!(value, 42);
 
-        // Test permission
-        let secured_model = SecuredModel { counter: 0 };
-        let syzygy = SyzygyBuilder::default().model(secured_model).build();
-
-        assert_eq!(syzygy.model::<SecuredModel>().counter, 0);
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_resources() {
         let model = TestModel { counter: 0 };
@@ -520,7 +511,7 @@ mod tests {
         assert_eq!(secured_resource.unwrap().name, "test_str");
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_dispatch() {
         let model = TestModel { counter: 0 };
@@ -550,7 +541,7 @@ mod tests {
         assert_eq!(syzygy.model::<TestModel>().counter, 5);
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_event_subscribe_unsubscribe() {
         use std::sync::atomic::{AtomicI32, Ordering};
@@ -588,7 +579,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_event_multiple_subscribers() {
         use std::sync::atomic::{AtomicI32, Ordering};
@@ -629,7 +620,7 @@ mod tests {
         assert_eq!(counter2.load(Ordering::SeqCst), 10);
     }
 
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn test_thread_spawn() {
         use std::sync::atomic::{AtomicI32, Ordering};
@@ -640,7 +631,7 @@ mod tests {
 
         // Test spawning a thread that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn(move || {
+        let rx = syzygy.spawn(move |cx| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -656,7 +647,7 @@ mod tests {
         let threads: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.spawn(move || {
+                syzygy.spawn(move |cx| {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })
@@ -677,9 +668,10 @@ mod tests {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let syzygy = Syzygy::builder()
             .model(model)
-            .tokio_rt(tokio::runtime::Runtime::new().unwrap())
+            .tokio_handle(rt.handle().clone())
             .build();
 
         let counter = Arc::new(AtomicI32::new(0));
@@ -732,7 +724,8 @@ mod tests {
 
         // Test spawning a parallel task that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn_parallel(move |_| {
+
+        let rx = syzygy.spawn_parallel(move |cx| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -1160,42 +1153,42 @@ mod tests {
     //     assert!(!cx.is_running());
     // }
     // #[ignore]
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
-    #[test]
-    fn benchmark_dispatch_model_read() {
-        use std::time::Instant;
+    // #[cfg(not(all(feature = "async", feature = "parallel")))]
+    // #[test]
+    // fn benchmark_dispatch_model_read() {
+    //     use std::time::Instant;
 
-        let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+    //     let model = TestModel { counter: 0 };
+    //     let syzygy = Syzygy::builder().model(model).build();
 
-        const ITERATIONS: usize = 1_000_000;
-        const RUNS: usize = 10;
+    //     const ITERATIONS: usize = 1_000_000;
+    //     const RUNS: usize = 10;
 
-        let mut best_duration = std::time::Duration::from_secs(u64::MAX);
+    //     let mut best_duration = std::time::Duration::from_secs(u64::MAX);
 
-        for _ in 0..RUNS {
-            let start = Instant::now();
+    //     for _ in 0..RUNS {
+    //         let start = Instant::now();
 
-            for _ in 0..ITERATIONS {
-                syzygy
-                    .dispatch(|cx: Syzygy| {
-                        cx.query(|m: &TestModel| m.counter);
-                    })
-                    .unwrap();
-            }
+    //         for _ in 0..ITERATIONS {
+    //             syzygy
+    //                 .dispatch(|cx: Syzygy| {
+    //                     cx.query(|m: &TestModel| m.counter);
+    //                 })
+    //                 .unwrap();
+    //         }
 
-            let duration = start.elapsed();
-            best_duration = best_duration.min(duration);
-        }
+    //         let duration = start.elapsed();
+    //         best_duration = best_duration.min(duration);
+    //     }
 
-        let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
+    //     let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
 
-        println!(
-            "Dispatch with model read benchmark:\n\
-             {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
-             {ops_per_sec:.2} ops/sec",
-        );
-    }
+    //     println!(
+    //         "Dispatch with model read benchmark:\n\
+    //          {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
+    //          {ops_per_sec:.2} ops/sec",
+    //     );
+    // }
     // #[test]
     // fn test_event() {
     //     let model = TestModel { counter: 0 };

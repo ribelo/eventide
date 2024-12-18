@@ -1,7 +1,4 @@
-use crate::{
-    context::{Context, ContextExecutor},
-    syzygy::Syzygy,
-};
+use crate::{context::{Context, ContextHandler}, syzygy::Syzygy};
 
 use crossbeam_channel::{Receiver, Sender};
 
@@ -40,15 +37,13 @@ impl Default for EffectBus {
 }
 
 impl EffectBus {
-    pub fn dispatch<H, T>(&self, effect: H) -> Result<(), EffectError>
-        where
-            H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
-        {
-            let effect = Box::new(move |syzygy: &Syzygy| effect.call(syzygy));
-            self.tx
-                .send(effect)
-                .map_err(|_| EffectError::ChannelClosed)
-        }
+    pub fn dispatch<H>(&self, effect: H) -> Result<(), EffectError>
+    where
+        H: ContextHandler<Syzygy, ()> + Send + Sync + 'static,
+    {
+        let effect = Box::new(move |syzygy: &Syzygy| effect.call(syzygy.clone()));
+        self.tx.send(effect).map_err(|_| EffectError::ChannelClosed)
+    }
 
     #[must_use]
     pub fn pop(&self) -> Option<Box<dyn Effect>> {
@@ -58,10 +53,10 @@ impl EffectBus {
 
 pub trait DispatchEffect: Sized + Context {
     fn effect_bus(&self) -> &EffectBus;
-    fn dispatch<H, T>(&self, effect: H) -> Result<(), EffectError>
-        where
-            H: ContextExecutor<Syzygy, T, ()> + Send + Sync + 'static,
-        {
-            self.effect_bus().dispatch(effect)
-        }
+    fn dispatch<H>(&self, effect: H) -> Result<(), EffectError>
+    where
+        H: ContextHandler<Syzygy, ()> + Send + Sync + 'static,
+    {
+        self.effect_bus().dispatch(effect)
+    }
 }

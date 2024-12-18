@@ -4,10 +4,9 @@ use crate::{
     resource::{ResourceAccess, Resources},
 };
 
-#[cfg(feature = "parallel")]
-use crate::spawn::{SpawnParallel, RayonPool};
-#[cfg(not(feature = "parallel"))]
 use crate::spawn::SpawnThread;
+#[cfg(feature = "parallel")]
+use crate::spawn::{RayonPool, SpawnParallel};
 
 use super::{Context, FromContext};
 
@@ -39,7 +38,7 @@ where
 #[cfg(feature = "parallel")]
 impl<C> FromContext<C> for ThreadContext
 where
-    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnParallel + 'static,
+    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnThread + SpawnParallel +'static,
 {
     fn from_context(cx: &C) -> Self {
         Self {
@@ -68,6 +67,8 @@ impl EmitEvent for ThreadContext {
         &self.event_bus
     }
 }
+
+impl SpawnThread for ThreadContext {}
 
 #[cfg(feature = "parallel")]
 impl SpawnParallel for ThreadContext {

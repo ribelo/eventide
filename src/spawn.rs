@@ -1,5 +1,7 @@
 #[cfg(feature = "async")]
 use std::future::Future;
+#[cfg(feature = "parallel")]
+use std::sync::Arc;
 
 #[cfg(any(feature = "async", feature = "parallel"))]
 use std::ops::Deref;
@@ -9,28 +11,27 @@ use std::sync::Arc;
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
 #[cfg(feature = "async")]
-use crate::context::AsyncContextExecutor;
-use crate::context::{thread::ThreadContext, Context, ContextExecutor, FromContext};
-#[cfg(any(feature = "async", feature = "parallel"))]
+use crate::context::AsyncContextHandler;
+use crate::context::{thread::ThreadContext, Context, ContextHandler, FromContext};
 use crate::{effect_bus::DispatchEffect, event_bus::EmitEvent, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: Context
+pub trait SpawnThread: Context + DispatchEffect + EmitEvent + ResourceAccess
 where
     ThreadContext: FromContext<Self>,
 {
-    fn spawn<H, T, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
+    fn spawn<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: ContextExecutor<ThreadContext, T, R> + Send + Sync + 'static,
+        H: ContextHandler<ThreadContext, R> + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
         std::thread::spawn(move || {
-            let result = handler.call(&ctx);
+            let result = handler.call(ctx);
             let _ = tx.send(result);
         });
 
@@ -55,9 +56,9 @@ where
     AsyncContext: FromContext<Self>,
 {
     fn tokio_handle(&self) -> &TokioHandle;
-    fn spawn_task<H, T, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
+    fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        H: AsyncContextExecutor<AsyncContext, T, Fut, R> + Send + Sync + 'static,
+        H: AsyncContextHandler<AsyncContext, T, Fut, R> + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
@@ -74,21 +75,21 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel: Context
+pub trait SpawnParallel: Context + DispatchEffect + EmitEvent + ResourceAccess
 where
     ThreadContext: FromContext<Self>,
 {
     fn rayon_pool(&self) -> &RayonPool;
-    fn spawn_parallel<H, T, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
+    fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: ContextExecutor<ThreadContext, T, R> + Send + Sync + 'static,
+        H: ContextHandler<ThreadContext, R> + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
 
         self.rayon_pool().spawn(move || {
-            let result = handler.call(&ctx);
+            let result = handler.call(ctx);
             let _ = tx.send(result);
         });
         rx
@@ -115,15 +116,6 @@ impl From<tokio::runtime::Handle> for TokioHandle {
     }
 }
 
-#[cfg(feature = "async")]
-impl<C> FromContext<C> for TokioHandle
-where
-    C: SpawnAsync + DispatchEffect + EmitEvent + ResourceAccess,
-{
-    fn from_context(cx: &C) -> Self {
-        cx.tokio_handle().clone()
-    }
-}
 
 #[cfg(feature = "parallel")]
 #[derive(Debug, Clone)]
@@ -142,15 +134,5 @@ impl Deref for RayonPool {
 impl From<rayon::ThreadPool> for RayonPool {
     fn from(pool: rayon::ThreadPool) -> Self {
         Self(Arc::new(pool))
-    }
-}
-
-#[cfg(feature = "parallel")]
-impl<C> FromContext<C> for RayonPool
-where
-    C: SpawnParallel + DispatchEffect + EmitEvent + ResourceAccess,
-{
-    fn from_context(cx: &C) -> Self {
-        cx.rayon_pool().clone()
     }
 }
