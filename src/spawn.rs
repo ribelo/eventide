@@ -5,33 +5,30 @@ use std::sync::Arc;
 
 #[cfg(any(feature = "async", feature = "parallel"))]
 use std::ops::Deref;
-#[cfg(feature = "async")]
-use std::sync::Arc;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
 #[cfg(feature = "async")]
-use crate::context::AsyncContextHandler;
-use crate::context::{thread::ThreadContext, Context, ContextHandler, FromContext};
+use crate::context::{thread::ThreadContext, Context, FromContext};
 use crate::{effect_bus::DispatchEffect, event_bus::EmitEvent, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: Context + DispatchEffect + EmitEvent + ResourceAccess
+pub trait SpawnThread: DispatchEffect + EmitEvent + ResourceAccess
 where
     ThreadContext: FromContext<Self>,
 {
     fn spawn<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: ContextHandler<ThreadContext, R> + Send + Sync + 'static,
+        H: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
         std::thread::spawn(move || {
-            let result = handler.call(ctx);
+            let result = (handler)(ctx);
             let _ = tx.send(result);
         });
 
@@ -58,7 +55,7 @@ where
     fn tokio_handle(&self) -> &TokioHandle;
     fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        H: AsyncContextHandler<AsyncContext, T, Fut, R> + Send + Sync + 'static,
+        H: FnOnce(AsyncContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
@@ -66,7 +63,7 @@ where
         let ctx = AsyncContext::from_context(self);
 
         self.tokio_handle().spawn(async move {
-            let result = handler.call(&ctx).await;
+            let result = (handler)(ctx).await;
             let _ = tx.send(result);
         });
 
@@ -82,14 +79,14 @@ where
     fn rayon_pool(&self) -> &RayonPool;
     fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: ContextHandler<ThreadContext, R> + Send + Sync + 'static,
+        H: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ThreadContext::from_context(self);
 
         self.rayon_pool().spawn(move || {
-            let result = handler.call(ctx);
+            let result = (handler)(ctx);
             let _ = tx.send(result);
         });
         rx

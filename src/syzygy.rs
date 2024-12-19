@@ -12,9 +12,9 @@ use crate::{
 };
 
 #[cfg(feature = "parallel")]
-use crate::spawn::{SpawnParallel, RayonPool};
+use crate::spawn::{RayonPool, SpawnParallel};
 #[cfg(feature = "async")]
-use crate::spawn::{TokioHandle, SpawnAsync};
+use crate::spawn::{SpawnAsync, TokioHandle};
 
 #[derive(Debug, Clone, Builder)]
 pub struct Syzygy {
@@ -476,7 +476,6 @@ mod tests {
         // Test query
         let value = syzygy.query(|m: &TestModel| m.counter);
         assert_eq!(value, 42);
-
     }
 
     #[cfg(not(any(feature = "async", feature = "parallel")))]
@@ -667,7 +666,12 @@ mod tests {
     fn test_tokio_spawn() {
         use std::sync::atomic::{AtomicI32, Ordering};
 
+        use crate::context::thread::ThreadContext;
+
         let model = TestModel { counter: 0 };
+        let resource = TestResource {
+            name: "test_str".to_string(),
+        };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let syzygy = Syzygy::builder()
             .model(model)
@@ -676,9 +680,49 @@ mod tests {
 
         let counter = Arc::new(AtomicI32::new(0));
 
+        // fn sync_handler<C>(cx: C)
+        // where
+        //     C: SpawnThread,
+        // {
+        //     println!("async_handler");
+        //     cx.resource::<TestResource>(); // działa
+        //     cx.spawn(|cx| {
+        //         //error
+        //         cx.resource::<TestResource>();
+        //     });
+        //     // cx.spawn_task(|cx| async {
+        //     //     cx.resource::<TestResource>();
+        //     // })
+        // }
+        // działa
+        syzygy.spawn(|cx| {
+            cx.resource::<TestResource>();
+        });
+        // nie działa
+        syzygy.spawn(|cx| {
+            cx.resource::<TestResource>();
+        });
+        // działa
+        syzygy.spawn(|cx| println!("hello from thread"));
+
+        async fn async_handler<C>(cx: C)
+        where
+            C: SpawnAsync,
+        {
+            println!("async_handler");
+            cx.resource::<TestResource>();
+            // cx.spawn(|cx| {
+            //     cx.resource::<TestResource>();
+            // });
+            // cx.spawn_task(|cx| async {
+            //     cx.resource::<TestResource>();
+            // })
+        }
+        syzygy.spawn_task(async_handler);
+
         // Test spawning a task that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn_task(move || async move {
+        let rx = syzygy.spawn_task(move |cx| async move {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
@@ -694,7 +738,7 @@ mod tests {
         let tasks: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.spawn_task(move || async move {
+                syzygy.spawn_task(move |cx| async move {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })
