@@ -11,7 +11,7 @@ pub mod prelude {
     pub use crate::context::{Context, FromContext};
     pub use crate::effect_bus::{DispatchEffect, EffectBus, EffectError};
     pub use crate::event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe, EventError};
-    pub use crate::model::{Model, ModelAccess, ModelModify, ModelMut, Models};
+    pub use crate::model::{ModelAccess, ModelModify};
     pub use crate::resource::{ResourceAccess, Resources, Resource};
     #[cfg(feature = "async")]
     pub use crate::spawn::SpawnAsync;

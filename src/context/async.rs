@@ -8,20 +8,21 @@ use crate::{
 use super::{Context, FromContext};
 
 #[derive(Debug, Clone)]
-pub struct AsyncContext {
+pub struct AsyncContext<M> {
     resources: Resources,
-    effect_bus: EffectBus,
-    event_bus: EventBus,
+    effect_bus: EffectBus<M>,
+    event_bus: EventBus<M>,
     tokio_handle: TokioHandle,
 }
 
-impl Context for AsyncContext {}
+impl<M> Context for AsyncContext<M> {}
 
-impl<C> FromContext<C> for AsyncContext
+impl<'a, C, M> FromContext<'a, C> for AsyncContext<M>
 where
-    C: ResourceAccess + DispatchEffect + EmitEvent + SpawnAsync + 'static,
+    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnAsync<'a, M> + 'static,
+    M: 'static,
 {
-    fn from_context(cx: &C) -> Self {
+    fn from_context(cx: &'a C) -> Self {
         Self {
             resources: cx.resources().clone(),
             effect_bus: cx.effect_bus().clone(),
@@ -31,26 +32,26 @@ where
     }
 }
 
-impl ResourceAccess for AsyncContext {
+impl<M> ResourceAccess for AsyncContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl DispatchEffect for AsyncContext {
-    fn effect_bus(&self) -> &EffectBus {
+impl<M> DispatchEffect<M> for AsyncContext<M> {
+    fn effect_bus(&self) -> &EffectBus<M> {
         &self.effect_bus
     }
 }
 
-impl EmitEvent for AsyncContext {
-    fn event_bus(&self) -> &EventBus {
+impl<M> EmitEvent<M> for AsyncContext<M> {
+    fn event_bus(&self) -> &EventBus<M> {
         &self.event_bus
     }
 }
 
-impl SpawnAsync for AsyncContext {
-    fn tokio_handle(&self) -> &TokioHandle {
+impl<'a, M: 'static> SpawnAsync<'a, M> for AsyncContext<M> {
+    fn tokio_handle(&'a self) -> &'a TokioHandle {
         &self.tokio_handle
     }
 }

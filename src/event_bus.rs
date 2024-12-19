@@ -41,38 +41,38 @@ impl EventType {
     }
 }
 
-type HandlerFn = Box<dyn Fn(&EventContext, &Box<dyn Event>) + Send + Sync>;
+type HandlerFn<M> = Box<dyn Fn(&mut EventContext<M>, &Box<dyn Event>) + Send + Sync>;
 
-pub struct EventHandler {
+pub struct EventHandler<M> {
     name: String,
-    handler: HandlerFn,
+    handler: HandlerFn<M>,
 }
 
 #[derive(Debug, Clone)]
-pub struct EventHandlers(Rc<RefCell<FxHashMap<EventType, Vec<EventHandler>>>>);
+pub struct EventHandlers<M>(Rc<RefCell<FxHashMap<EventType, Vec<EventHandler<M>>>>>);
 
-impl Deref for EventHandlers {
-    type Target = Rc<RefCell<FxHashMap<EventType, Vec<EventHandler>>>>;
+impl<M> Deref for EventHandlers<M> {
+    type Target = Rc<RefCell<FxHashMap<EventType, Vec<EventHandler<M>>>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for EventHandlers {
+impl<M> DerefMut for EventHandlers<M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
 #[allow(clippy::borrowed_box)]
-impl EventHandler {
-    pub fn handle(&self, cx: &EventContext, event: &Box<dyn Event>) {
+impl<M> EventHandler<M> {
+    pub fn handle(&self, cx: &mut EventContext<M>, event: &Box<dyn Event>) {
         (self.handler)(cx, event);
     }
 }
 
-impl fmt::Debug for EventHandler {
+impl<M> fmt::Debug for EventHandler<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EventHandler")
             .field("name", &self.name)
@@ -89,14 +89,24 @@ pub enum EventError {
     RuntimeStopped,
 }
 
-#[derive(Debug, Clone)]
-pub struct EventBus {
+#[derive(Debug)]
+pub struct EventBus<M> {
     pub(crate) tx: Sender<(EventType, Box<dyn Event>)>,
     pub(crate) rx: Receiver<(EventType, Box<dyn Event>)>,
-    pub(crate) handlers: Arc<RwLock<FxHashMap<EventType, Vec<EventHandler>>>>,
+    pub(crate) handlers: Arc<RwLock<FxHashMap<EventType, Vec<EventHandler<M>>>>>,
 }
 
-impl Default for EventBus {
+impl<M> Clone for EventBus<M> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            rx: self.rx.clone(),
+            handlers: Arc::clone(&self.handlers),
+        }
+    }
+}
+
+impl<M> Default for EventBus<M> {
     fn default() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         Self {
@@ -125,7 +135,7 @@ pub enum EventHandlerError {
     Unregistered(String),
 }
 
-impl EventBus {
+impl<M> EventBus<M> {
     pub fn emit<E>(&self, event: E) -> Result<(), EmitError>
     where
         E: Event,
@@ -138,7 +148,7 @@ impl EventBus {
     pub fn subscribe<T>(
         &self,
         name: Option<impl Into<String>>,
-        handler: impl Fn(&EventContext, &T) + Send + Sync + 'static,
+        handler: impl Fn(&EventContext<M>, &T) + Send + Sync + 'static,
     ) -> Result<(), EventHandlerError>
     where
         T: Event + Send + Sync + 'static,
@@ -156,7 +166,7 @@ impl EventBus {
         }
 
         #[allow(clippy::borrowed_box)]
-        let handler = Box::new(move |cx: &EventContext, event: &Box<dyn Event>| {
+        let handler = Box::new(move |cx: &mut EventContext<M>, event: &Box<dyn Event>| {
             if let Some(event) = event.downcast_ref::<T>() {
                 handler(cx, event);
             }
@@ -197,7 +207,7 @@ impl EventBus {
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn handle(
         &self,
-        cx: &EventContext,
+        cx: &mut EventContext<M>,
         event_type: &EventType,
         event: Box<dyn Event>,
     ) -> Result<(), EventHandlerError> {
@@ -215,8 +225,8 @@ impl EventBus {
     }
 }
 
-pub trait EmitEvent: Sized + Context {
-    fn event_bus(&self) -> &EventBus;
+pub trait EmitEvent<M>: Sized + Context {
+    fn event_bus(&self) -> &EventBus<M>;
     fn emit<E>(&self, event: E) -> Result<(), EmitError>
     where
         E: Event,
@@ -225,11 +235,11 @@ pub trait EmitEvent: Sized + Context {
     }
 }
 
-pub trait Subscribe: EmitEvent + Sized + Context {
+pub trait Subscribe<M>: EmitEvent<M> + Sized + Context {
     fn subscribe<E>(
         &self,
         name: Option<impl Into<String>>,
-        handler: impl Fn(&EventContext, &E) + Send + Sync + 'static,
+        handler: impl Fn(&EventContext<M>, &E) + Send + Sync + 'static,
     ) -> Result<(), EventHandlerError>
     where
         E: Event + Send + Sync + 'static,
@@ -238,7 +248,7 @@ pub trait Subscribe: EmitEvent + Sized + Context {
     }
 }
 
-pub trait Unsubscribe: Subscribe + Sized + Context {
+pub trait Unsubscribe<M>: Subscribe<M> + Sized + Context {
     fn unsubscribe(&self, name: impl Into<String>) -> Result<(), EventHandlerError> {
         self.event_bus().unsubscribe(name)
     }

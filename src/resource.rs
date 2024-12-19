@@ -68,7 +68,7 @@ pub struct Resource<T>(pub T)
 where
     T: Clone + Send + Sync + 'static;
 
-impl<C, T> FromContext<C> for Resource<T>
+impl<C, T> FromContext<'_, C> for Resource<T>
 where
     C: Context + ResourceAccess,
     T: Clone + Send + Sync + 'static,

@@ -8,21 +8,21 @@ use std::ops::Deref;
 
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
-#[cfg(feature = "async")]
-use crate::context::{thread::ThreadContext, Context, FromContext};
+use crate::context::{thread::ThreadContext, FromContext};
 use crate::{effect_bus::DispatchEffect, event_bus::EmitEvent, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: DispatchEffect + EmitEvent + ResourceAccess
+pub trait SpawnThread<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
 where
-    ThreadContext: FromContext<Self>,
+    M: 'static,
+    ThreadContext<M>: FromContext<'a, Self>,
 {
-    fn spawn<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
+    fn spawn<H, R>(&'a self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -48,14 +48,15 @@ pub enum AsyncTaskError {
 }
 
 #[cfg(feature = "async")]
-pub trait SpawnAsync: Context + DispatchEffect + EmitEvent + ResourceAccess
+pub trait SpawnAsync<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
 where
-    AsyncContext: FromContext<Self>,
+    M: 'static,
+    AsyncContext<M>: FromContext<'a, Self>,
 {
-    fn tokio_handle(&self) -> &TokioHandle;
-    fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
+    fn tokio_handle(&'a self) -> &'a TokioHandle;
+    fn spawn_task<H, Fut, R>(&'a self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        H: FnOnce(AsyncContext) -> Fut + Send + Sync + 'static,
+        H: FnOnce(AsyncContext<M>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
@@ -72,14 +73,15 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel: Context + DispatchEffect + EmitEvent + ResourceAccess
+pub trait SpawnParallel<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
 where
-    ThreadContext: FromContext<Self>,
+    M: 'static,
+    ThreadContext<M>: FromContext<'a, Self>,
 {
-    fn rayon_pool(&self) -> &RayonPool;
-    fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
+    fn rayon_pool(&'a self) -> &'a RayonPool;
+    fn spawn_parallel<H, R>(&'a self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: FnOnce(ThreadContext) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);

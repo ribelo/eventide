@@ -1,12 +1,10 @@
 use bon::Builder;
-#[cfg(feature = "async")]
-use std::sync::Arc;
 
 use crate::{
     context::{event::EventContext, Context, FromContext},
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
-    model::{ModelAccess, ModelModify, Models},
+    model::{ModelAccess, ModelModify},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
@@ -17,32 +15,20 @@ use crate::spawn::{RayonPool, SpawnParallel};
 use crate::spawn::{SpawnAsync, TokioHandle};
 
 #[derive(Debug, Clone, Builder)]
-pub struct Syzygy {
-    #[builder(field)]
-    pub models: Models,
+pub struct Syzygy<M: 'static> {
     #[builder(field)]
     pub resources: Resources,
     #[builder(skip)]
-    pub effect_bus: EffectBus,
+    pub effect_bus: EffectBus<M>,
     #[builder(skip)]
-    pub event_bus: EventBus,
+    pub event_bus: EventBus<M>,
     #[cfg(feature = "async")]
     #[builder(into)]
     pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
-}
-
-#[cfg(feature = "unsync")]
-impl<S: syzygy_builder::State> SyzygyBuilder<S> {
-    pub fn model<M>(mut self, model: M) -> SyzygyBuilder<S>
-    where
-        M: 'static,
-    {
-        self.models.insert(model);
-        self
-    }
+    pub model: M,
 }
 
 #[cfg(feature = "sync")]
@@ -56,8 +42,8 @@ impl<S: syzygy_builder::State> SyzygyBuilder<S> {
     }
 }
 
-impl<S: syzygy_builder::State> SyzygyBuilder<S> {
-    pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<S>
+impl<M, S: syzygy_builder::State> SyzygyBuilder<M, S> {
+    pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<M, S>
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -66,23 +52,23 @@ impl<S: syzygy_builder::State> SyzygyBuilder<S> {
     }
 }
 
-impl Syzygy {
-    pub(crate) fn handle_effects(&self) {
+impl<M> Syzygy<M> {
+    pub(crate) fn handle_effects(&mut self) {
         while let Some(effect) = self.effect_bus.pop() {
             effect.handle(self);
         }
     }
 
-    pub(crate) fn handle_events(&self) {
-        let cx = EventContext::from_context(self);
+    pub(crate) fn handle_events(&mut self) {
+        let mut cx = EventContext::from_context(self);
         while let Some((event_type, event)) = self.event_bus.pop() {
-            if let Err(err) = self.event_bus.handle(&cx, &event_type, event) {
+            if let Err(err) = self.event_bus.handle(&mut cx, &event_type, event) {
                 log::warn!("{}", err);
             }
         }
     }
 
-    pub fn handle_waiting(&self) {
+    pub fn handle_waiting(&mut self) {
         self.handle_effects();
         self.handle_events();
     }
@@ -104,144 +90,56 @@ impl Syzygy {
 //     }
 // }
 
-impl Context for Syzygy {}
+impl<M> Context for Syzygy<M> {}
 
-#[cfg(all(not(feature = "async"), not(feature = "parallel")))]
-impl<C: Context> FromContext<C> for Syzygy
-where
-    C: Context
-        + ModelAccess
-        + ModelModify
-        + ResourceAccess
-        + DispatchEffect
-        + EmitEvent
-        + SpawnThread,
-{
-    fn from_context(cx: &C) -> Self {
-        Self {
-            models: cx.models().clone(),
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-        }
+impl<M> ModelAccess<M> for Syzygy<M> {
+    fn model(&self) -> &M {
+        &self.model
     }
 }
 
-#[cfg(all(feature = "async", not(feature = "parallel")))]
-impl<C: Context> FromContext<C> for Syzygy
-where
-    C: Context
-        + ModelAccess
-        + ModelModify
-        + ResourceAccess
-        + DispatchEffect
-        + EmitEvent
-        + SpawnThread
-        + SpawnAsync,
-{
-    fn from_context(cx: &C) -> Self {
-        Self {
-            models: cx.models().clone(),
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-            tokio_handle: cx.tokio_handle().clone(),
-        }
+impl<M> ModelModify<M> for Syzygy<M> {
+    fn model_mut(&mut self) -> &mut M {
+        &mut self.model
     }
 }
 
-#[cfg(all(not(feature = "async"), feature = "parallel"))]
-impl<C: Context> FromContext<C> for Syzygy
-where
-    C: Context
-        + ModelAccess
-        + ModelModify
-        + ResourceAccess
-        + DispatchEffect
-        + EmitEvent
-        + SpawnThread
-        + SpawnParallel,
-{
-    fn from_context(cx: &C) -> Self {
-        Self {
-            models: cx.models().clone(),
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-            rayon_pool: cx.rayon_pool().clone(),
-        }
-    }
-}
-
-#[cfg(all(feature = "async", feature = "parallel"))]
-impl<C: Context> FromContext<C> for Syzygy
-where
-    C: Context
-        + ModelAccess
-        + ModelModify
-        + ResourceAccess
-        + DispatchEffect
-        + EmitEvent
-        + SpawnThread
-        + SpawnParallel
-        + SpawnAsync,
-{
-    fn from_context(cx: &C) -> Self {
-        Self {
-            models: cx.models().clone(),
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-            tokio_handle: cx.tokio_handle().clone(),
-            rayon_pool: cx.rayon_pool().clone(),
-        }
-    }
-}
-
-impl ModelAccess for Syzygy {
-    fn models(&self) -> &Models {
-        &self.models
-    }
-}
-
-impl ModelModify for Syzygy {}
-
-impl ResourceAccess for Syzygy {
+impl<M> ResourceAccess for Syzygy<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl DispatchEffect for Syzygy {
-    fn effect_bus(&self) -> &EffectBus {
+impl<M> DispatchEffect<M> for Syzygy<M> {
+    fn effect_bus(&self) -> &EffectBus<M> {
         &self.effect_bus
     }
 }
 
-impl EmitEvent for Syzygy {
-    fn event_bus(&self) -> &EventBus {
+impl<M> EmitEvent<M> for Syzygy<M> {
+    fn event_bus(&self) -> &EventBus<M> {
         &self.event_bus
     }
 }
 
-impl SpawnThread for Syzygy {}
+impl<M> SpawnThread<'_, M> for Syzygy<M> {}
 
 #[cfg(feature = "async")]
-impl SpawnAsync for Syzygy {
+impl<M> SpawnAsync<'_, M> for Syzygy<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
 
 #[cfg(feature = "parallel")]
-impl SpawnParallel for Syzygy {
+impl<M> SpawnParallel<'_, M> for Syzygy<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
 }
 
-impl Subscribe for Syzygy {}
-impl Unsubscribe for Syzygy {}
+impl<M> Subscribe<M> for Syzygy<M> {}
+impl<M> Unsubscribe<M> for Syzygy<M> {}
 
 // // impl<M: Model> EffectBuilder<M> {
 // //     #[must_use]
@@ -443,38 +341,27 @@ mod tests {
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         // Test initial state
-        let counter = syzygy.model::<TestModel>().counter;
+        let counter = syzygy.model().counter;
         assert_eq!(counter, 0);
 
         // Test model() access
-        assert_eq!(syzygy.model::<TestModel>().counter, 0);
+        assert_eq!(syzygy.model().counter, 0);
 
         // Test model_mut() modification
-        syzygy.model_mut::<TestModel>().counter += 1;
-        assert_eq!(syzygy.model::<TestModel>().counter, 1);
-
-        // Test try_model() for existing model
-        let model = syzygy.try_model::<TestModel>();
-        assert!(model.is_some());
-        assert_eq!(model.unwrap().counter, 1);
-
-        // Test try_model_mut() for existing model
-        let model_mut = syzygy.try_model_mut::<TestModel>();
-        assert!(model_mut.is_some());
-        model_mut.unwrap().counter += 1;
-        assert_eq!(syzygy.model::<TestModel>().counter, 2);
+        syzygy.model_mut().counter += 1;
+        assert_eq!(syzygy.model().counter, 1);
 
         // Test update
-        syzygy.update(|m: &mut TestModel| {
+        syzygy.update(|m| {
             m.counter = 42;
         });
-        assert_eq!(syzygy.model::<TestModel>().counter, 42);
+        assert_eq!(syzygy.model().counter, 42);
 
         // Test query
-        let value = syzygy.query(|m: &TestModel| m.counter);
+        let value = syzygy.query(|m| m.counter);
         assert_eq!(value, 42);
     }
 
@@ -514,30 +401,30 @@ mod tests {
     #[test]
     fn test_dispatch() {
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         // Test dispatching updates
         syzygy
-            .dispatch(|cx: Syzygy| {
+            .dispatch(|cx| {
                 cx.update(|m: &mut TestModel| m.counter += 1);
             })
             .unwrap();
 
         // Test dispatching multiple updates
         syzygy
-            .dispatch(|cx: Syzygy| {
+            .dispatch(|cx| {
                 cx.update(|m: &mut TestModel| m.counter += 1);
                 cx.update(|m: &mut TestModel| m.counter += 1);
                 cx.update(|m: &mut TestModel| m.counter += 1);
             })
             .unwrap();
         syzygy
-            .dispatch(|cx: Syzygy| {
+            .dispatch(|cx| {
                 cx.update(|m: &mut TestModel| m.counter += 1);
             })
             .unwrap();
         syzygy.handle_waiting();
-        assert_eq!(syzygy.model::<TestModel>().counter, 5);
+        assert_eq!(syzygy.model().counter, 5);
     }
 
     #[cfg(not(any(feature = "async", feature = "parallel")))]
@@ -545,7 +432,7 @@ mod tests {
     fn test_event_subscribe_unsubscribe() {
         use std::sync::atomic::{AtomicI32, Ordering};
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         #[derive(Debug)]
         struct TestEvent(i32);
@@ -583,7 +470,7 @@ mod tests {
     fn test_event_multiple_subscribers() {
         use std::sync::atomic::{AtomicI32, Ordering};
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         #[derive(Debug)]
         struct TestEvent(i32);
@@ -625,7 +512,7 @@ mod tests {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
         let counter = Arc::new(AtomicI32::new(0));
 
         // Test spawning a thread that increments counter
@@ -634,6 +521,16 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
+
+        fn spawn_handler<'a, C, M>(cx: C)
+        where
+            C: SpawnThread<'a, M> + 'static,
+            M: 'static,
+        {
+            println!("hello from thread");
+        }
+
+        syzygy.spawn(spawn_handler);
 
         syzygy.handle_waiting();
         // Wait for thread to complete
@@ -705,9 +602,9 @@ mod tests {
         // działa
         syzygy.spawn(|cx| println!("hello from thread"));
 
-        async fn async_handler<C>(cx: C)
+        async fn async_handler<'a, C: 'static, M: 'static>(cx: C)
         where
-            C: SpawnAsync,
+            C: SpawnAsync<'a, M>,
         {
             println!("async_handler");
             cx.resource::<TestResource>();
@@ -1197,42 +1094,74 @@ mod tests {
     //     assert!(!cx.is_running());
     // }
     // #[ignore]
-    // #[cfg(not(all(feature = "async", feature = "parallel")))]
-    // #[test]
-    // fn benchmark_dispatch_model_read() {
-    //     use std::time::Instant;
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[test]
+    fn benchmark_dispatch_model_read() {
+        use std::time::Instant;
 
-    //     let model = TestModel { counter: 0 };
-    //     let syzygy = Syzygy::builder().model(model).build();
+        let model = TestModel { counter: 0 };
+        let syzygy = Syzygy::builder().model(model).build();
 
-    //     const ITERATIONS: usize = 1_000_000;
-    //     const RUNS: usize = 10;
+        const ITERATIONS: usize = 1_000_000;
+        const RUNS: usize = 10;
 
-    //     let mut best_duration = std::time::Duration::from_secs(u64::MAX);
+        let mut best_duration = std::time::Duration::from_secs(u64::MAX);
 
-    //     for _ in 0..RUNS {
-    //         let start = Instant::now();
+        for _ in 0..RUNS {
+            let start = Instant::now();
 
-    //         for _ in 0..ITERATIONS {
-    //             syzygy
-    //                 .dispatch(|cx: Syzygy| {
-    //                     cx.query(|m: &TestModel| m.counter);
-    //                 })
-    //                 .unwrap();
-    //         }
+            for _ in 0..ITERATIONS {
+                syzygy
+                    .dispatch(|cx| {
+                        cx.query(|m: &TestModel| m.counter);
+                    })
+                    .unwrap();
+            }
 
-    //         let duration = start.elapsed();
-    //         best_duration = best_duration.min(duration);
-    //     }
+            let duration = start.elapsed();
+            best_duration = best_duration.min(duration);
+        }
 
-    //     let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
+        let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
 
-    //     println!(
-    //         "Dispatch with model read benchmark:\n\
-    //          {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
-    //          {ops_per_sec:.2} ops/sec",
-    //     );
-    // }
+        println!(
+            "Dispatch with model read benchmark:\n\
+             {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
+             {ops_per_sec:.2} ops/sec",
+        );
+    }
+    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[test]
+    fn benchmark_direct_model_update() {
+        use std::time::Instant;
+
+        let model = TestModel { counter: 0 };
+        let mut syzygy = Syzygy::builder().model(model).build();
+
+        const ITERATIONS: usize = 1_000_000;
+        const RUNS: usize = 10;
+
+        let mut best_duration = std::time::Duration::from_secs(u64::MAX);
+
+        for _ in 0..RUNS {
+            let start = Instant::now();
+
+            for _ in 0..ITERATIONS {
+                syzygy.update(|m| m.counter += 1);
+            }
+
+            let duration = start.elapsed();
+            best_duration = best_duration.min(duration);
+        }
+
+        let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
+
+        println!(
+            "Direct model update benchmark:\n\
+             {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
+             {ops_per_sec:.2} ops/sec",
+        );
+    }
     // #[test]
     // fn test_event() {
     //     let model = TestModel { counter: 0 };

@@ -8,10 +8,7 @@ mod unsync;
 compile_error!("Features 'sync' and 'unsync' cannot be enabled simultaneously");
 
 #[cfg(feature = "unsync")]
-pub use unsync::{
-    UnsyncModel as Model, UnsyncModelAccess as ModelAccess, UnsyncModelModify as ModelModify,
-    UnsyncModelMut as ModelMut, UnsyncModels as Models, UnsyncModelsBuilder as ModelsBuilder,
-};
+pub use unsync::{UnsyncModelAccess as ModelAccess, UnsyncModelModify as ModelModify};
 
 #[cfg(feature = "sync")]
 pub use sync::{
