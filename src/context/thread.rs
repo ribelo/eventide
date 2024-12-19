@@ -24,7 +24,7 @@ impl<M> Context for ThreadContext<M> {}
 #[cfg(not(feature = "parallel"))]
 impl<'a, C, M> FromContext<'a, C> for ThreadContext<M>
 where
-    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnThread<M> + 'static,
+    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnThread<'a, M> + 'static,
     M: 'static,
 {
     fn from_context(cx: &C) -> Self {
@@ -70,7 +70,7 @@ impl<M> EmitEvent<M> for ThreadContext<M> {
     }
 }
 
-impl<M> SpawnThread<M> for ThreadContext<M> {}
+impl<M: 'static> SpawnThread<'_, M> for ThreadContext<M> {}
 
 #[cfg(feature = "parallel")]
 impl<'a, M: 'static> SpawnParallel<'a, M> for ThreadContext<M> {

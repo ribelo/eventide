@@ -524,7 +524,7 @@ mod tests {
 
         fn spawn_handler<'a, C, M>(cx: C)
         where
-            C: SpawnThread<'a, M> + 'static,
+            C: SpawnThread<'a, M>,
             M: 'static,
         {
             println!("hello from thread");

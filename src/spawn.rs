@@ -15,7 +15,7 @@ use crate::{effect_bus::DispatchEffect, event_bus::EmitEvent, resource::Resource
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
+pub trait SpawnThread<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
 where
     M: 'static,
     ThreadContext<M>: FromContext<'a, Self>,
@@ -48,7 +48,7 @@ pub enum AsyncTaskError {
 }
 
 #[cfg(feature = "async")]
-pub trait SpawnAsync<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
+pub trait SpawnAsync<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
 where
     M: 'static,
     AsyncContext<M>: FromContext<'a, Self>,
@@ -73,7 +73,7 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess
+pub trait SpawnParallel<'a, M>: DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
 where
     M: 'static,
     ThreadContext<M>: FromContext<'a, Self>,
