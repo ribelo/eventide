@@ -1,6 +1,5 @@
 #[cfg(feature = "async")]
 pub mod r#async;
-pub mod event;
 pub mod thread;
 
 pub trait Context: Sized {}

@@ -1,7 +1,9 @@
+use std::cell::{Ref, RefCell, RefMut};
+
 use bon::Builder;
 
 use crate::{
-    context::{event::EventContext, Context, FromContext},
+    context::Context,
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelModify},
@@ -28,12 +30,13 @@ pub struct Syzygy<M: 'static> {
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
-    pub model: M,
+    #[builder(into)]
+    pub model: RefCell<M>,
 }
 
 #[cfg(feature = "sync")]
 impl<S: syzygy_builder::State> SyzygyBuilder<S> {
-    pub fn model<M>(mut self, model: M) -> SyzygyBuilder<S>
+    pub fn model<M>(self, model: M) -> SyzygyBuilder<S>
     where
         M: Sync + Send + 'static,
     {
@@ -53,16 +56,16 @@ impl<M, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 }
 
 impl<M> Syzygy<M> {
-    pub(crate) fn handle_effects(&mut self) {
+    pub(crate) fn handle_effects(&self) {
         while let Some(effect) = self.effect_bus.pop() {
             effect.handle(self);
         }
     }
 
     pub(crate) fn handle_events(&mut self) {
-        let mut cx = EventContext::from_context(self);
         while let Some((event_type, event)) = self.event_bus.pop() {
-            if let Err(err) = self.event_bus.handle(&mut cx, &event_type, event) {
+            let event_bus = self.event_bus.clone();
+            if let Err(err) = event_bus.handle(self, &event_type, event) {
                 log::warn!("{}", err);
             }
         }
@@ -93,14 +96,14 @@ impl<M> Syzygy<M> {
 impl<M> Context for Syzygy<M> {}
 
 impl<M> ModelAccess<M> for Syzygy<M> {
-    fn model(&self) -> &M {
-        &self.model
+    fn model(&self) -> Ref<M> {
+        self.model.borrow()
     }
 }
 
 impl<M> ModelModify<M> for Syzygy<M> {
-    fn model_mut(&mut self) -> &mut M {
-        &mut self.model
+    fn model_mut(&self) -> RefMut<M> {
+        self.model.borrow_mut()
     }
 }
 
@@ -341,7 +344,7 @@ mod tests {
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         // Test initial state
         let counter = syzygy.model().counter;
@@ -406,7 +409,7 @@ mod tests {
         // Test dispatching updates
         syzygy
             .dispatch(|cx| {
-                cx.update(|m: &mut TestModel| m.counter += 1);
+                cx.update(|m| m.counter += 1);
             })
             .unwrap();
 
@@ -1136,7 +1139,7 @@ mod tests {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;

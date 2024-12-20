@@ -11,7 +11,7 @@ use crate::spawn::{RayonPool, SpawnParallel};
 use super::{Context, FromContext};
 
 #[derive(Clone)]
-pub struct ThreadContext<M> {
+pub struct ThreadContext<M: 'static> {
     resources: Resources,
     effect_bus: EffectBus<M>,
     event_bus: EventBus<M>,

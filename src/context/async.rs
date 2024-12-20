@@ -8,7 +8,7 @@ use crate::{
 use super::{Context, FromContext};
 
 #[derive(Debug, Clone)]
-pub struct AsyncContext<M> {
+pub struct AsyncContext<M: 'static> {
     resources: Resources,
     effect_bus: EffectBus<M>,
     event_bus: EventBus<M>,

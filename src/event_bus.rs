@@ -13,7 +13,7 @@ use downcast_rs::{impl_downcast, DowncastSync};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
-use crate::context::{event::EventContext, Context};
+use crate::{context::Context, syzygy::Syzygy};
 
 pub trait Event: DowncastSync + 'static {}
 impl_downcast!(sync Event);
@@ -41,15 +41,15 @@ impl EventType {
     }
 }
 
-type HandlerFn<M> = Box<dyn Fn(&mut EventContext<M>, &Box<dyn Event>) + Send + Sync>;
+type HandlerFn<M> = Box<dyn Fn(&mut Syzygy<M>, &Box<dyn Event>) + Send + Sync>;
 
-pub struct EventHandler<M> {
+pub struct EventHandler<M: 'static> {
     name: String,
     handler: HandlerFn<M>,
 }
 
 #[derive(Debug, Clone)]
-pub struct EventHandlers<M>(Rc<RefCell<FxHashMap<EventType, Vec<EventHandler<M>>>>>);
+pub struct EventHandlers<M: 'static>(Rc<RefCell<FxHashMap<EventType, Vec<EventHandler<M>>>>>);
 
 impl<M> Deref for EventHandlers<M> {
     type Target = Rc<RefCell<FxHashMap<EventType, Vec<EventHandler<M>>>>>;
@@ -66,8 +66,11 @@ impl<M> DerefMut for EventHandlers<M> {
 }
 
 #[allow(clippy::borrowed_box)]
-impl<M> EventHandler<M> {
-    pub fn handle(&self, cx: &mut EventContext<M>, event: &Box<dyn Event>) {
+impl<M> EventHandler<M>
+where
+    M: 'static,
+{
+    pub fn handle(&self, cx: &mut Syzygy<M>, event: &Box<dyn Event>) {
         (self.handler)(cx, event);
     }
 }
@@ -90,7 +93,10 @@ pub enum EventError {
 }
 
 #[derive(Debug)]
-pub struct EventBus<M> {
+pub struct EventBus<M>
+where
+    M: 'static,
+{
     pub(crate) tx: Sender<(EventType, Box<dyn Event>)>,
     pub(crate) rx: Receiver<(EventType, Box<dyn Event>)>,
     pub(crate) handlers: Arc<RwLock<FxHashMap<EventType, Vec<EventHandler<M>>>>>,
@@ -148,7 +154,7 @@ impl<M> EventBus<M> {
     pub fn subscribe<T>(
         &self,
         name: Option<impl Into<String>>,
-        handler: impl Fn(&EventContext<M>, &T) + Send + Sync + 'static,
+        handler: impl Fn(&Syzygy<M>, &T) + Send + Sync + 'static,
     ) -> Result<(), EventHandlerError>
     where
         T: Event + Send + Sync + 'static,
@@ -166,7 +172,7 @@ impl<M> EventBus<M> {
         }
 
         #[allow(clippy::borrowed_box)]
-        let handler = Box::new(move |cx: &mut EventContext<M>, event: &Box<dyn Event>| {
+        let handler = Box::new(move |cx: &mut Syzygy<M>, event: &Box<dyn Event>| {
             if let Some(event) = event.downcast_ref::<T>() {
                 handler(cx, event);
             }
@@ -207,7 +213,7 @@ impl<M> EventBus<M> {
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn handle(
         &self,
-        cx: &mut EventContext<M>,
+        cx: &mut Syzygy<M>,
         event_type: &EventType,
         event: Box<dyn Event>,
     ) -> Result<(), EventHandlerError> {
@@ -225,7 +231,10 @@ impl<M> EventBus<M> {
     }
 }
 
-pub trait EmitEvent<M>: Sized + Context {
+pub trait EmitEvent<M>: Sized + Context
+where
+    M: 'static,
+{
     fn event_bus(&self) -> &EventBus<M>;
     fn emit<E>(&self, event: E) -> Result<(), EmitError>
     where
@@ -235,11 +244,14 @@ pub trait EmitEvent<M>: Sized + Context {
     }
 }
 
-pub trait Subscribe<M>: EmitEvent<M> + Sized + Context {
+pub trait Subscribe<M>: EmitEvent<M> + Sized + Context
+where
+    M: 'static,
+{
     fn subscribe<E>(
         &self,
         name: Option<impl Into<String>>,
-        handler: impl Fn(&EventContext<M>, &E) + Send + Sync + 'static,
+        handler: impl Fn(&Syzygy<M>, &E) + Send + Sync + 'static,
     ) -> Result<(), EventHandlerError>
     where
         E: Event + Send + Sync + 'static,
@@ -248,7 +260,10 @@ pub trait Subscribe<M>: EmitEvent<M> + Sized + Context {
     }
 }
 
-pub trait Unsubscribe<M>: Subscribe<M> + Sized + Context {
+pub trait Unsubscribe<M>: Subscribe<M> + Sized + Context
+where
+    M: 'static,
+{
     fn unsubscribe(&self, name: impl Into<String>) -> Result<(), EventHandlerError> {
         self.event_bus().unsubscribe(name)
     }
