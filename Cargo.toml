@@ -23,7 +23,6 @@ tokio = { version = "1.4", features = ["rt-multi-thread", "sync"], optional = tr
 crossbeam-channel = "0.5"
 downcast-rs = "1.2"
 log = "0.4"
-generational-box = "0.6.0"
 bon = "3.3.0"
 
 [dev-dependencies]

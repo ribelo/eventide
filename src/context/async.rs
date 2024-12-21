@@ -2,12 +2,13 @@ use crate::{
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources},
-    spawn::{TokioHandle, SpawnAsync},
+    spawn::{SpawnAsync, TokioHandle},
+    syzygy::Syzygy,
 };
 
-use super::{Context, FromContext};
+use super::Context;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AsyncContext<M: 'static> {
     resources: Resources,
     effect_bus: EffectBus<M>,
@@ -15,19 +16,26 @@ pub struct AsyncContext<M: 'static> {
     tokio_handle: TokioHandle,
 }
 
+impl<M> Clone for AsyncContext<M> {
+    fn clone(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            effect_bus: self.effect_bus.clone(),
+            event_bus: self.event_bus.clone(),
+            tokio_handle: self.tokio_handle.clone(),
+        }
+    }
+}
+
 impl<M> Context for AsyncContext<M> {}
 
-impl<'a, C, M> FromContext<'a, C> for AsyncContext<M>
-where
-    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnAsync<'a, M> + 'static,
-    M: 'static,
-{
-    fn from_context(cx: &'a C) -> Self {
+impl<M> From<Syzygy<M>> for AsyncContext<M> {
+    fn from(value: Syzygy<M>) -> Self {
         Self {
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-            tokio_handle: cx.tokio_handle().clone(),
+            resources: value.resources().clone(),
+            effect_bus: value.effect_bus().clone(),
+            event_bus: value.event_bus().clone(),
+            tokio_handle: value.tokio_handle().clone(),
         }
     }
 }
@@ -50,8 +58,8 @@ impl<M> EmitEvent<M> for AsyncContext<M> {
     }
 }
 
-impl<'a, M: 'static> SpawnAsync<'a, M> for AsyncContext<M> {
-    fn tokio_handle(&'a self) -> &'a TokioHandle {
+impl<M: 'static> SpawnAsync<M> for AsyncContext<M> {
+    fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }

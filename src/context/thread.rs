@@ -1,16 +1,15 @@
 use crate::{
     effect_bus::{DispatchEffect, EffectBus},
     event_bus::{EmitEvent, EventBus},
-    resource::{ResourceAccess, Resources},
+    resource::{ResourceAccess, Resources}, syzygy::Syzygy,
 };
 
 use crate::spawn::SpawnThread;
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
 
-use super::{Context, FromContext};
+use super::{Context};
 
-#[derive(Clone)]
 pub struct ThreadContext<M: 'static> {
     resources: Resources,
     effect_bus: EffectBus<M>,
@@ -19,38 +18,46 @@ pub struct ThreadContext<M: 'static> {
     rayon_pool: RayonPool,
 }
 
+impl<M> Clone for ThreadContext<M> {
+    fn clone(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            effect_bus: self.effect_bus.clone(),
+            event_bus: self.event_bus.clone(),
+            #[cfg(feature = "parallel")]
+            rayon_pool: self.rayon_pool.clone(),
+        }
+    }
+}
+
 impl<M> Context for ThreadContext<M> {}
 
-#[cfg(not(feature = "parallel"))]
-impl<'a, C, M> FromContext<'a, C> for ThreadContext<M>
-where
-    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnThread<'a, M> + 'static,
-    M: 'static,
-{
-    fn from_context(cx: &C) -> Self {
+impl<M> From<Syzygy<M>> for ThreadContext<M> {
+    fn from(syzygy: Syzygy<M>) -> Self {
         Self {
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
+            resources: syzygy.resources,
+            effect_bus: syzygy.effect_bus,
+            event_bus: syzygy.event_bus,
+            #[cfg(feature = "parallel")]
+            rayon_pool: syzygy.rayon_pool,
         }
     }
 }
 
-#[cfg(feature = "parallel")]
-impl<'a, C, M> FromContext<'a, C> for ThreadContext<M>
-where
-    C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnThread<'a, M> + SpawnParallel<'a, M> +'static,
-    M: 'static,
-{
-    fn from_context(cx: &'a C) -> Self {
-        Self {
-            resources: cx.resources().clone(),
-            effect_bus: cx.effect_bus().clone(),
-            event_bus: cx.event_bus().clone(),
-            rayon_pool: cx.rayon_pool().clone(),
-        }
-    }
-}
+// #[cfg(not(feature = "parallel"))]
+// impl<'a, C, M> FromContext<'a, C> for ThreadContext<M>
+// where
+//     C: ResourceAccess + DispatchEffect<M> + EmitEvent<M> + SpawnThread<'a, M> + 'static,
+//     M: 'static,
+// {
+//     fn from_context(cx: &C) -> Self {
+//         Self {
+//             resources: cx.resources().clone(),
+//             effect_bus: cx.effect_bus().clone(),
+//             event_bus: cx.event_bus().clone(),
+//         }
+//     }
+// }
 
 impl<M> ResourceAccess for ThreadContext<M> {
     fn resources(&self) -> &Resources {
@@ -70,11 +77,11 @@ impl<M> EmitEvent<M> for ThreadContext<M> {
     }
 }
 
-impl<M: 'static> SpawnThread<'_, M> for ThreadContext<M> {}
+impl<M: 'static> SpawnThread<M> for ThreadContext<M> {}
 
 #[cfg(feature = "parallel")]
-impl<'a, M: 'static> SpawnParallel<'a, M> for ThreadContext<M> {
-    fn rayon_pool(&'a self) -> &'a RayonPool {
+impl<M: 'static> SpawnParallel<M> for ThreadContext<M> {
+    fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
 }

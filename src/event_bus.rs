@@ -41,7 +41,7 @@ impl EventType {
     }
 }
 
-type HandlerFn<M> = Box<dyn Fn(&mut Syzygy<M>, &Box<dyn Event>) + Send + Sync>;
+type HandlerFn<M> = Box<dyn Fn(&Syzygy<M>, &Box<dyn Event>) + Send + Sync>;
 
 pub struct EventHandler<M: 'static> {
     name: String,
@@ -70,7 +70,7 @@ impl<M> EventHandler<M>
 where
     M: 'static,
 {
-    pub fn handle(&self, cx: &mut Syzygy<M>, event: &Box<dyn Event>) {
+    pub fn handle(&self, cx: &Syzygy<M>, event: &Box<dyn Event>) {
         (self.handler)(cx, event);
     }
 }
@@ -172,7 +172,7 @@ impl<M> EventBus<M> {
         }
 
         #[allow(clippy::borrowed_box)]
-        let handler = Box::new(move |cx: &mut Syzygy<M>, event: &Box<dyn Event>| {
+        let handler = Box::new(move |cx: &Syzygy<M>, event: &Box<dyn Event>| {
             if let Some(event) = event.downcast_ref::<T>() {
                 handler(cx, event);
             }
@@ -213,7 +213,7 @@ impl<M> EventBus<M> {
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn handle(
         &self,
-        cx: &mut Syzygy<M>,
+        cx: &Syzygy<M>,
         event_type: &EventType,
         event: Box<dyn Event>,
     ) -> Result<(), EventHandlerError> {

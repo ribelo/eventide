@@ -2,24 +2,21 @@ use std::{
     any::{Any, TypeId},
     fmt,
     ops::Deref,
+    sync::{Arc, RwLock},
 };
 
-use generational_box::{GenerationalBox, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
 
-use crate::context::{Context, FromContext};
+use crate::context::Context;
 
-#[derive(Clone, Default)]
-pub struct Resources {
-    owner: Owner<SyncStorage>,
-    models: FxHashMap<TypeId, GenerationalBox<Box<dyn Any + Send + Sync>, SyncStorage>>,
-}
+#[derive(Default, Debug, Clone)]
+pub struct Resources(Arc<RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>>);
 
-impl fmt::Debug for Resources {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Resources")
-            .field("models", &self.models)
-            .finish_non_exhaustive()
+impl Deref for Resources {
+    type Target = RwLock<FxHashMap<TypeId, Box<dyn Any + Send + Sync>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -30,8 +27,8 @@ impl Resources {
     {
         let ty = TypeId::of::<T>();
         let boxed_value = Box::new(value);
-        self.models
-            .insert(ty, self.owner.insert(boxed_value));
+        let mut lock = self.write().expect("Failed to acquire write lock");
+        lock.insert(ty, boxed_value);
     }
 
     #[must_use]
@@ -40,9 +37,8 @@ impl Resources {
         T: Clone + Send + Sync + 'static,
     {
         let ty = TypeId::of::<T>();
-        self.models.get(&ty).map(|resource| {
-            let boxed_value = resource.read();
-            // SAFETY: We verify the type matches via TypeId before calling downcast_ref_unchecked
+        let lock = self.read().expect("Failed to acquire read lock");
+        lock.get(&ty).map(|boxed_value| {
             unsafe { boxed_value.downcast_ref_unchecked::<T>().clone() }
         })
     }
@@ -61,38 +57,5 @@ pub trait ResourceAccess: Context {
         T: Clone + Send + Sync + 'static,
     {
         self.resources().get::<T>()
-    }
-}
-
-pub struct Resource<T>(pub T)
-where
-    T: Clone + Send + Sync + 'static;
-
-impl<C, T> FromContext<'_, C> for Resource<T>
-where
-    C: Context + ResourceAccess,
-    T: Clone + Send + Sync + 'static,
-{
-    fn from_context(context: &C) -> Self {
-        context.resource::<T>().into()
-    }
-}
-
-impl<T> From<T> for Resource<T>
-where
-    T: Clone + Send + Sync + 'static,
-{
-    fn from(value: T) -> Self {
-        Self(value)
-    }
-}
-
-impl<T> Deref for Resource<T>
-where
-    T: Clone + Send + Sync + 'static,
-{
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }

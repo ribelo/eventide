@@ -8,11 +8,11 @@ pub mod spawn;
 pub mod syzygy;
 
 pub mod prelude {
-    pub use crate::context::{Context, FromContext};
+    pub use crate::context::Context;
     pub use crate::effect_bus::{DispatchEffect, EffectBus, EffectError};
-    pub use crate::event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe, EventError};
+    pub use crate::event_bus::{EmitEvent, EventBus, EventError, Subscribe, Unsubscribe};
     pub use crate::model::{ModelAccess, ModelModify};
-    pub use crate::resource::{ResourceAccess, Resources, Resource};
+    pub use crate::resource::{ResourceAccess, Resources};
     #[cfg(feature = "async")]
     pub use crate::spawn::SpawnAsync;
     #[cfg(feature = "parallel")]

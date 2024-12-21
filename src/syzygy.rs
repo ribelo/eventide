@@ -1,4 +1,7 @@
-use std::cell::{Ref, RefCell, RefMut};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    rc::Rc,
+};
 
 use bon::Builder;
 
@@ -16,7 +19,7 @@ use crate::spawn::{RayonPool, SpawnParallel};
 #[cfg(feature = "async")]
 use crate::spawn::{SpawnAsync, TokioHandle};
 
-#[derive(Debug, Clone, Builder)]
+#[derive(Debug, Builder)]
 pub struct Syzygy<M: 'static> {
     #[builder(field)]
     pub resources: Resources,
@@ -30,8 +33,8 @@ pub struct Syzygy<M: 'static> {
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
-    #[builder(into)]
-    pub model: RefCell<M>,
+    #[builder(with = |model: M| Rc::new(RefCell::new(model)))]
+    pub model: Rc<RefCell<M>>,
 }
 
 #[cfg(feature = "sync")]
@@ -55,6 +58,21 @@ impl<M, S: syzygy_builder::State> SyzygyBuilder<M, S> {
     }
 }
 
+impl<M> Clone for Syzygy<M> {
+    fn clone(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            effect_bus: self.effect_bus.clone(),
+            event_bus: self.event_bus.clone(),
+            #[cfg(feature = "async")]
+            tokio_handle: self.tokio_handle.clone(),
+            #[cfg(feature = "parallel")]
+            rayon_pool: self.rayon_pool.clone(),
+            model: Rc::clone(&self.model),
+        }
+    }
+}
+
 impl<M> Syzygy<M> {
     pub(crate) fn handle_effects(&self) {
         while let Some(effect) = self.effect_bus.pop() {
@@ -62,7 +80,7 @@ impl<M> Syzygy<M> {
         }
     }
 
-    pub(crate) fn handle_events(&mut self) {
+    pub(crate) fn handle_events(&self) {
         while let Some((event_type, event)) = self.event_bus.pop() {
             let event_bus = self.event_bus.clone();
             if let Err(err) = event_bus.handle(self, &event_type, event) {
@@ -71,7 +89,7 @@ impl<M> Syzygy<M> {
         }
     }
 
-    pub fn handle_waiting(&mut self) {
+    pub fn handle_waiting(&self) {
         self.handle_effects();
         self.handle_events();
     }
@@ -125,17 +143,17 @@ impl<M> EmitEvent<M> for Syzygy<M> {
     }
 }
 
-impl<M> SpawnThread<'_, M> for Syzygy<M> {}
+impl<M> SpawnThread<M> for Syzygy<M> {}
 
 #[cfg(feature = "async")]
-impl<M> SpawnAsync<'_, M> for Syzygy<M> {
+impl<M> SpawnAsync<M> for Syzygy<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
 
 #[cfg(feature = "parallel")]
-impl<M> SpawnParallel<'_, M> for Syzygy<M> {
+impl<M> SpawnParallel<M> for Syzygy<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
@@ -404,7 +422,7 @@ mod tests {
     #[test]
     fn test_dispatch() {
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
 
         // Test dispatching updates
         syzygy
@@ -525,9 +543,9 @@ mod tests {
             42 // Return value
         });
 
-        fn spawn_handler<'a, C, M>(cx: C)
+        fn spawn_handler<C, M>(cx: C)
         where
-            C: SpawnThread<'a, M>,
+            C: SpawnThread<M>,
             M: 'static,
         {
             println!("hello from thread");
@@ -605,9 +623,9 @@ mod tests {
         // działa
         syzygy.spawn(|cx| println!("hello from thread"));
 
-        async fn async_handler<'a, C: 'static, M: 'static>(cx: C)
+        async fn async_handler<C: 'static, M: 'static>(cx: C)
         where
-            C: SpawnAsync<'a, M>,
+            C: SpawnAsync<M>,
         {
             println!("async_handler");
             cx.resource::<TestResource>();
@@ -1097,7 +1115,7 @@ mod tests {
     //     assert!(!cx.is_running());
     // }
     // #[ignore]
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn benchmark_dispatch_model_read() {
         use std::time::Instant;
@@ -1133,7 +1151,7 @@ mod tests {
              {ops_per_sec:.2} ops/sec",
         );
     }
-    #[cfg(not(all(feature = "async", feature = "parallel")))]
+    #[cfg(not(any(feature = "async", feature = "parallel")))]
     #[test]
     fn benchmark_direct_model_update() {
         use std::time::Instant;
