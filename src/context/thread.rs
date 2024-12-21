@@ -1,5 +1,5 @@
 use crate::{
-    effect_bus::{DispatchEffect, EffectBus}, model::Model, resource::{ResourceAccess, Resources}, syzygy::Syzygy
+    effect_bus::{DispatchEffect, EffectBus}, model::{Model, ModelAccess}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
 };
 
 use crate::spawn::SpawnThread;
@@ -46,6 +46,12 @@ impl<M: Model> From<Syzygy<M>> for ThreadContext<M> {
 //         }
 //     }
 // }
+
+impl<M: Model> ModelAccess<M> for ThreadContext<M> {
+    fn model(&self) -> &M {
+        &self.model_snapshot
+    }
+}
 
 impl<M: Model> ResourceAccess for ThreadContext<M> {
     fn resources(&self) -> &Resources {

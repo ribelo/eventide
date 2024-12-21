@@ -1,19 +1,26 @@
-// #[cfg(feature = "sync")]
-// mod sync;
-#[cfg(feature = "unsync")]
+use crate::context::Context;
+
 mod unsync;
-
-#[cfg(all(feature = "sync", feature = "unsync"))]
-compile_error!("Features 'sync' and 'unsync' cannot be enabled simultaneously");
-
-#[cfg(feature = "unsync")]
-pub use unsync::{UnsyncModelAccess as ModelAccess, UnsyncModelModify as ModelModify};
 
 pub trait Model: Clone + Send + Sync + 'static {}
 impl<T> Model for T where T: Clone + Send + Sync + 'static {}
 
-// #[cfg(feature = "sync")]
-// pub use sync::{
-//     SyncModel as Model, SyncModelAccess as ModelAccess, SyncModelModify as ModelModify,
-//     SyncModelMut as ModelMut, SyncModels as Models, SyncModelsBuilder as ModelsBuilder,
-// };
+pub trait ModelAccess<M>: Context {
+    fn model(&self) -> &M;
+    fn query<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&M) -> R,
+    {
+        f(self.model())
+    }
+}
+
+pub trait ModelModify<M>: ModelAccess<M> {
+    fn model_mut(&mut self) -> &mut M;
+    fn update<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut M),
+    {
+        f(self.model_mut());
+    }
+}

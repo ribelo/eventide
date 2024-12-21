@@ -1,5 +1,5 @@
 use crate::{
-    effect_bus::{DispatchEffect, EffectBus}, model::Model, resource::{ResourceAccess, Resources}, spawn::{SpawnAsync, TokioHandle}, syzygy::Syzygy
+    effect_bus::{DispatchEffect, EffectBus}, model::{Model, ModelAccess}, resource::{ResourceAccess, Resources}, spawn::{SpawnAsync, TokioHandle}, syzygy::Syzygy
 };
 
 use super::Context;
@@ -33,6 +33,12 @@ impl<M: Model> From<Syzygy<M>> for AsyncContext<M> {
             tokio_handle: syzygy.tokio_handle().clone(),
             model_snapshot: syzygy.model.clone(),
         }
+    }
+}
+
+impl<M: Model> ModelAccess<M> for AsyncContext<M> {
+    fn model(&self) -> &M {
+        &self.model_snapshot
     }
 }
 

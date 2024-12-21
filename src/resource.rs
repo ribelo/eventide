@@ -1,6 +1,5 @@
 use std::{
     any::{Any, TypeId},
-    fmt,
     ops::Deref,
     sync::{Arc, RwLock},
 };
@@ -38,9 +37,10 @@ impl Resources {
     {
         let ty = TypeId::of::<T>();
         let lock = self.read().expect("Failed to acquire read lock");
-        lock.get(&ty).map(|boxed_value| {
-            unsafe { boxed_value.downcast_ref_unchecked::<T>().clone() }
-        })
+        lock.get(&ty).map(|boxed_value|
+            // SAFETY: We verify the type matches via TypeId before insertion,
+            // so this downcast is guaranteed to succeed
+            unsafe { boxed_value.downcast_ref_unchecked::<T>().clone() })
     }
 }
 

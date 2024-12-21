@@ -11,8 +11,8 @@ where
     M: Model,
     F: FnOnce(&mut Syzygy<M>) + Send + Sync + 'static,
 {
-    fn handle(self: Box<Self>, mut syzygy: &mut Syzygy<M>) {
-        (*self)(&mut syzygy);
+    fn handle(self: Box<Self>, syzygy: &mut Syzygy<M>) {
+        (*self)(syzygy);
     }
 }
 
