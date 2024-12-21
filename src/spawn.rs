@@ -9,16 +9,15 @@ use std::ops::Deref;
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
+use crate::model::Model;
 use crate::{effect_bus::DispatchEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread<M>:
+pub trait SpawnThread<M: Model>:
     Into<ThreadContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
-where
-    M: 'static,
 {
     fn spawn<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
@@ -48,10 +47,8 @@ pub enum AsyncTaskError {
 }
 
 #[cfg(feature = "async")]
-pub trait SpawnAsync<M>:
+pub trait SpawnAsync<M: Model>:
     Into<AsyncContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
-where
-    M: 'static,
 {
     fn tokio_handle(&self) -> &TokioHandle;
     fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
@@ -73,10 +70,8 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel<M>:
+pub trait SpawnParallel<M: Model>:
     Into<ThreadContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
-where
-    M: 'static,
 {
     fn rayon_pool(&self) -> &RayonPool;
     fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>

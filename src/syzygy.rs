@@ -1,14 +1,9 @@
-use std::{
-    cell::{Ref, RefCell, RefMut},
-    rc::Rc,
-};
-
 use bon::Builder;
 
 use crate::{
     context::Context,
     effect_bus::{DispatchEffect, EffectBus},
-    model::{ModelAccess, ModelModify},
+    model::{Model, ModelAccess, ModelModify},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
@@ -18,8 +13,8 @@ use crate::spawn::{RayonPool, SpawnParallel};
 #[cfg(feature = "async")]
 use crate::spawn::{SpawnAsync, TokioHandle};
 
-#[derive(Debug, Builder)]
-pub struct Syzygy<M: 'static> {
+#[derive(Debug, Clone, Builder)]
+pub struct Syzygy<M: Model> {
     #[builder(field)]
     pub resources: Resources,
     #[builder(skip)]
@@ -30,22 +25,10 @@ pub struct Syzygy<M: 'static> {
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
-    #[builder(with = |model: M| Rc::new(RefCell::new(model)))]
-    pub model: Rc<RefCell<M>>,
+    pub model: M,
 }
 
-#[cfg(feature = "sync")]
-impl<S: syzygy_builder::State> SyzygyBuilder<S> {
-    pub fn model<M>(self, model: M) -> SyzygyBuilder<S>
-    where
-        M: Sync + Send + 'static,
-    {
-        self.models.insert(model);
-        self
-    }
-}
-
-impl<M, S: syzygy_builder::State> SyzygyBuilder<M, S> {
+impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
     pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<M, S>
     where
         T: Clone + Send + Sync + 'static,
@@ -55,65 +38,51 @@ impl<M, S: syzygy_builder::State> SyzygyBuilder<M, S> {
     }
 }
 
-impl<M> Clone for Syzygy<M> {
-    fn clone(&self) -> Self {
-        Self {
-            resources: self.resources.clone(),
-            effect_bus: self.effect_bus.clone(),
-            #[cfg(feature = "async")]
-            tokio_handle: self.tokio_handle.clone(),
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool.clone(),
-            model: Rc::clone(&self.model),
-        }
-    }
-}
-
-impl<M> Syzygy<M> {
-    pub fn handle_effects(&self) {
+impl<M: Model> Syzygy<M> {
+    pub fn handle_effects(&mut self) {
         while let Some(effect) = self.effect_bus.pop() {
             effect.handle(self);
         }
     }
 }
 
-impl<M> Context for Syzygy<M> {}
+impl<M: Model> Context for Syzygy<M> {}
 
-impl<M> ModelAccess<M> for Syzygy<M> {
-    fn model(&self) -> Ref<M> {
-        self.model.borrow()
+impl<M: Model> ModelAccess<M> for Syzygy<M> {
+    fn model(&self) -> &M {
+        &self.model
     }
 }
 
-impl<M> ModelModify<M> for Syzygy<M> {
-    fn model_mut(&self) -> RefMut<M> {
-        self.model.borrow_mut()
+impl<M: Model> ModelModify<M> for Syzygy<M> {
+    fn model_mut(&mut self) -> &mut M {
+        &mut self.model
     }
 }
 
-impl<M> ResourceAccess for Syzygy<M> {
+impl<M: Model> ResourceAccess for Syzygy<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M> DispatchEffect<M> for Syzygy<M> {
+impl<M: Model> DispatchEffect<M> for Syzygy<M> {
     fn effect_bus(&self) -> &EffectBus<M> {
         &self.effect_bus
     }
 }
 
-impl<M> SpawnThread<M> for Syzygy<M> {}
+impl<M: Model> SpawnThread<M> for Syzygy<M> {}
 
 #[cfg(feature = "async")]
-impl<M> SpawnAsync<M> for Syzygy<M> {
+impl<M: Model> SpawnAsync<M> for Syzygy<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
 
 #[cfg(feature = "parallel")]
-impl<M> SpawnParallel<M> for Syzygy<M> {
+impl<M: Model> SpawnParallel<M> for Syzygy<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
@@ -292,7 +261,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct TestModel {
         counter: i32,
     }
@@ -314,7 +283,7 @@ mod tests {
     #[test]
     fn test_model() {
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         // Test initial state
         let counter = syzygy.model().counter;
@@ -374,7 +343,7 @@ mod tests {
     #[test]
     fn test_dispatch() {
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         // Test dispatching updates
         syzygy
@@ -406,7 +375,7 @@ mod tests {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
         let counter = Arc::new(AtomicI32::new(0));
 
         // Test spawning a thread that increments counter
@@ -1020,7 +989,7 @@ mod tests {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let syzygy = Syzygy::builder().model(model).build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;

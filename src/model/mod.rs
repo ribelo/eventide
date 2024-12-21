@@ -9,6 +9,9 @@ compile_error!("Features 'sync' and 'unsync' cannot be enabled simultaneously");
 #[cfg(feature = "unsync")]
 pub use unsync::{UnsyncModelAccess as ModelAccess, UnsyncModelModify as ModelModify};
 
+pub trait Model: Clone + Send + Sync + 'static {}
+impl<T> Model for T where T: Clone + Send + Sync + 'static {}
+
 // #[cfg(feature = "sync")]
 // pub use sync::{
 //     SyncModel as Model, SyncModelAccess as ModelAccess, SyncModelModify as ModelModify,

@@ -1,17 +1,18 @@
-use crate::{context::Context, syzygy::Syzygy};
+use crate::{context::Context, model::Model, syzygy::Syzygy};
 
 use crossbeam_channel::{Receiver, Sender};
 
-pub trait Effect<M>: Send + Sync + 'static {
-    fn handle(self: Box<Self>, syzygy: &Syzygy<M>);
+pub trait Effect<M: Model>: Send + Sync + 'static {
+    fn handle(self: Box<Self>, syzygy: &mut Syzygy<M>);
 }
 
 impl<M, F> Effect<M> for F
 where
-    F: FnOnce(&Syzygy<M>) + Send + Sync + 'static,
+    M: Model,
+    F: FnOnce(&mut Syzygy<M>) + Send + Sync + 'static,
 {
-    fn handle(self: Box<Self>, syzygy: &Syzygy<M>) {
-        (*self)(syzygy);
+    fn handle(self: Box<Self>, mut syzygy: &mut Syzygy<M>) {
+        (*self)(&mut syzygy);
     }
 }
 
@@ -45,10 +46,10 @@ impl<M> Default for EffectBus<M> {
     }
 }
 
-impl<M> EffectBus<M> {
+impl<M: Model> EffectBus<M> {
     pub fn dispatch<E>(&self, effect: E) -> Result<(), EffectError>
     where
-        E: FnOnce(&Syzygy<M>) + Send + Sync + 'static,
+        E: FnOnce(&mut Syzygy<M>) + Send + Sync + 'static,
     {
         let effect = Box::new(effect);
         self.tx.send(effect).map_err(|_| EffectError::ChannelClosed)
@@ -60,11 +61,11 @@ impl<M> EffectBus<M> {
     }
 }
 
-pub trait DispatchEffect<M>: Sized + Context {
+pub trait DispatchEffect<M: Model>: Sized + Context {
     fn effect_bus(&self) -> &EffectBus<M>;
     fn dispatch<E>(&self, effect: E) -> Result<(), EffectError>
     where
-        E: FnOnce(&Syzygy<M>) + Send + Sync + 'static,
+        E: FnOnce(&mut Syzygy<M>) + Send + Sync + 'static,
     {
         self.effect_bus().dispatch(effect)
     }

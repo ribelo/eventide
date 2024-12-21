@@ -1,39 +1,31 @@
 use crate::{
-    effect_bus::{DispatchEffect, EffectBus},
-    resource::{ResourceAccess, Resources}, syzygy::Syzygy,
+    effect_bus::{DispatchEffect, EffectBus}, model::Model, resource::{ResourceAccess, Resources}, syzygy::Syzygy
 };
 
 use crate::spawn::SpawnThread;
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
 
-use super::{Context};
+use super::Context;
 
-pub struct ThreadContext<M: 'static> {
+#[derive(Debug, Clone)]
+pub struct ThreadContext<M: Model> {
     resources: Resources,
     effect_bus: EffectBus<M>,
+    model_snapshot: M,
     #[cfg(feature = "parallel")]
     rayon_pool: RayonPool,
 }
 
-impl<M> Clone for ThreadContext<M> {
-    fn clone(&self) -> Self {
-        Self {
-            resources: self.resources.clone(),
-            effect_bus: self.effect_bus.clone(),
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool.clone(),
-        }
-    }
-}
 
-impl<M> Context for ThreadContext<M> {}
+impl<M: Model> Context for ThreadContext<M> {}
 
-impl<M> From<Syzygy<M>> for ThreadContext<M> {
+impl<M: Model> From<Syzygy<M>> for ThreadContext<M> {
     fn from(syzygy: Syzygy<M>) -> Self {
         Self {
             resources: syzygy.resources,
             effect_bus: syzygy.effect_bus,
+            model_snapshot: syzygy.model.clone(),
             #[cfg(feature = "parallel")]
             rayon_pool: syzygy.rayon_pool,
         }
@@ -55,22 +47,22 @@ impl<M> From<Syzygy<M>> for ThreadContext<M> {
 //     }
 // }
 
-impl<M> ResourceAccess for ThreadContext<M> {
+impl<M: Model> ResourceAccess for ThreadContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M> DispatchEffect<M> for ThreadContext<M> {
+impl<M: Model> DispatchEffect<M> for ThreadContext<M> {
     fn effect_bus(&self) -> &EffectBus<M> {
         &self.effect_bus
     }
 }
 
-impl<M: 'static> SpawnThread<M> for ThreadContext<M> {}
+impl<M: Model> SpawnThread<M> for ThreadContext<M> {}
 
 #[cfg(feature = "parallel")]
-impl<M: 'static> SpawnParallel<M> for ThreadContext<M> {
+impl<M: Model> SpawnParallel<M> for ThreadContext<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
