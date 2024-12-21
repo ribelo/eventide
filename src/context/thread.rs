@@ -1,6 +1,5 @@
 use crate::{
     effect_bus::{DispatchEffect, EffectBus},
-    event_bus::{EmitEvent, EventBus},
     resource::{ResourceAccess, Resources}, syzygy::Syzygy,
 };
 
@@ -13,7 +12,6 @@ use super::{Context};
 pub struct ThreadContext<M: 'static> {
     resources: Resources,
     effect_bus: EffectBus<M>,
-    event_bus: EventBus<M>,
     #[cfg(feature = "parallel")]
     rayon_pool: RayonPool,
 }
@@ -23,7 +21,6 @@ impl<M> Clone for ThreadContext<M> {
         Self {
             resources: self.resources.clone(),
             effect_bus: self.effect_bus.clone(),
-            event_bus: self.event_bus.clone(),
             #[cfg(feature = "parallel")]
             rayon_pool: self.rayon_pool.clone(),
         }
@@ -37,7 +34,6 @@ impl<M> From<Syzygy<M>> for ThreadContext<M> {
         Self {
             resources: syzygy.resources,
             effect_bus: syzygy.effect_bus,
-            event_bus: syzygy.event_bus,
             #[cfg(feature = "parallel")]
             rayon_pool: syzygy.rayon_pool,
         }
@@ -68,12 +64,6 @@ impl<M> ResourceAccess for ThreadContext<M> {
 impl<M> DispatchEffect<M> for ThreadContext<M> {
     fn effect_bus(&self) -> &EffectBus<M> {
         &self.effect_bus
-    }
-}
-
-impl<M> EmitEvent<M> for ThreadContext<M> {
-    fn event_bus(&self) -> &EventBus<M> {
-        &self.event_bus
     }
 }
 

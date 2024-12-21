@@ -8,7 +8,6 @@ use bon::Builder;
 use crate::{
     context::Context,
     effect_bus::{DispatchEffect, EffectBus},
-    event_bus::{EmitEvent, EventBus, Subscribe, Unsubscribe},
     model::{ModelAccess, ModelModify},
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
@@ -25,8 +24,6 @@ pub struct Syzygy<M: 'static> {
     pub resources: Resources,
     #[builder(skip)]
     pub effect_bus: EffectBus<M>,
-    #[builder(skip)]
-    pub event_bus: EventBus<M>,
     #[cfg(feature = "async")]
     #[builder(into)]
     pub tokio_handle: TokioHandle,
@@ -63,7 +60,6 @@ impl<M> Clone for Syzygy<M> {
         Self {
             resources: self.resources.clone(),
             effect_bus: self.effect_bus.clone(),
-            event_bus: self.event_bus.clone(),
             #[cfg(feature = "async")]
             tokio_handle: self.tokio_handle.clone(),
             #[cfg(feature = "parallel")]
@@ -74,42 +70,12 @@ impl<M> Clone for Syzygy<M> {
 }
 
 impl<M> Syzygy<M> {
-    pub(crate) fn handle_effects(&self) {
+    pub fn handle_effects(&self) {
         while let Some(effect) = self.effect_bus.pop() {
             effect.handle(self);
         }
     }
-
-    pub(crate) fn handle_events(&self) {
-        while let Some((event_type, event)) = self.event_bus.pop() {
-            let event_bus = self.event_bus.clone();
-            if let Err(err) = event_bus.handle(self, &event_type, event) {
-                log::warn!("{}", err);
-            }
-        }
-    }
-
-    pub fn handle_waiting(&self) {
-        self.handle_effects();
-        self.handle_events();
-    }
-    // pub fn shutdown(self) {
-    //     // Handle any pending effects/events first
-    //     self.handle_waiting();
-    //     #[cfg(feature = "async")]
-    //     // Shutdown with timeout
-    //     MutexGuard::map(self.tokio_runtime.lock(), |rt| {
-    //        rt.shutdown_background();
-    //        rt;
-    //     });
-    // }
 }
-
-// impl Drop for Syzygy {
-//     fn drop(&mut self) {
-//         self.handle_waiting();
-//     }
-// }
 
 impl<M> Context for Syzygy<M> {}
 
@@ -137,12 +103,6 @@ impl<M> DispatchEffect<M> for Syzygy<M> {
     }
 }
 
-impl<M> EmitEvent<M> for Syzygy<M> {
-    fn event_bus(&self) -> &EventBus<M> {
-        &self.event_bus
-    }
-}
-
 impl<M> SpawnThread<M> for Syzygy<M> {}
 
 #[cfg(feature = "async")]
@@ -158,9 +118,6 @@ impl<M> SpawnParallel<M> for Syzygy<M> {
         &self.rayon_pool
     }
 }
-
-impl<M> Subscribe<M> for Syzygy<M> {}
-impl<M> Unsubscribe<M> for Syzygy<M> {}
 
 // // impl<M: Model> EffectBuilder<M> {
 // //     #[must_use]
@@ -345,11 +302,6 @@ mod tests {
         name: String,
     }
 
-    #[derive(Debug)]
-    struct SecuredModel {
-        counter: i32,
-    }
-
     #[derive(Debug, Clone, Copy, Default)]
     pub struct SomePermission;
 
@@ -444,87 +396,8 @@ mod tests {
                 cx.update(|m: &mut TestModel| m.counter += 1);
             })
             .unwrap();
-        syzygy.handle_waiting();
+        syzygy.handle_effects();
         assert_eq!(syzygy.model().counter, 5);
-    }
-
-    #[cfg(not(any(feature = "async", feature = "parallel")))]
-    #[test]
-    fn test_event_subscribe_unsubscribe() {
-        use std::sync::atomic::{AtomicI32, Ordering};
-        let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
-
-        #[derive(Debug)]
-        struct TestEvent(i32);
-
-        // Setup atomic counter for events
-        let counter = Arc::new(AtomicI32::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        // Subscribe handler
-        syzygy
-            .subscribe::<TestEvent>(Some("test_handler"), move |_cx, event| {
-                counter_clone.fetch_add(event.0, Ordering::SeqCst);
-            })
-            .unwrap();
-
-        // Emit events
-        syzygy.emit(TestEvent(1)).unwrap();
-        syzygy.emit(TestEvent(2)).unwrap();
-        syzygy.handle_waiting();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
-
-        // Unsubscribe handler
-        syzygy.unsubscribe("test_handler").unwrap();
-
-        // Emit more events that should not be handled
-        syzygy.emit(TestEvent(4)).unwrap();
-        syzygy.handle_waiting();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
-    }
-
-    #[cfg(not(any(feature = "async", feature = "parallel")))]
-    #[test]
-    fn test_event_multiple_subscribers() {
-        use std::sync::atomic::{AtomicI32, Ordering};
-        let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
-
-        #[derive(Debug)]
-        struct TestEvent(i32);
-
-        // Setup atomic counters for different handlers
-        let counter1 = Arc::new(AtomicI32::new(0));
-        let counter2 = Arc::new(AtomicI32::new(0));
-
-        let counter1_clone = Arc::clone(&counter1);
-        let counter2_clone = Arc::clone(&counter2);
-
-        // Subscribe multiple handlers
-        syzygy
-            .event_bus
-            .subscribe::<TestEvent>(Some("handler1"), move |_cx, event| {
-                counter1_clone.fetch_add(event.0, Ordering::SeqCst);
-            })
-            .unwrap();
-
-        syzygy
-            .event_bus
-            .subscribe::<TestEvent>(Some("handler2"), move |_cx, event| {
-                counter2_clone.fetch_add(event.0 * 2, Ordering::SeqCst);
-            })
-            .unwrap();
-
-        // Emit event
-        syzygy.emit(TestEvent(5)).unwrap();
-        syzygy.handle_waiting();
-
-        // Check both handlers processed event
-        assert_eq!(counter1.load(Ordering::SeqCst), 5);
-        assert_eq!(counter2.load(Ordering::SeqCst), 10);
     }
 
     #[cfg(not(any(feature = "async", feature = "parallel")))]
@@ -533,27 +406,17 @@ mod tests {
         use std::sync::atomic::{AtomicI32, Ordering};
 
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model).build();
+        let syzygy = Syzygy::builder().model(model).build();
         let counter = Arc::new(AtomicI32::new(0));
 
         // Test spawning a thread that increments counter
         let counter_clone = Arc::clone(&counter);
-        let rx = syzygy.spawn(move |cx| {
+        let rx = syzygy.spawn(move |_| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             42 // Return value
         });
 
-        fn spawn_handler<C, M>(cx: C)
-        where
-            C: SpawnThread<M>,
-            M: 'static,
-        {
-            println!("hello from thread");
-        }
-
-        syzygy.spawn(spawn_handler);
-
-        syzygy.handle_waiting();
+        syzygy.handle_effects();
         // Wait for thread to complete
         let result = rx.recv().unwrap();
 
@@ -564,13 +427,13 @@ mod tests {
         let threads: Vec<_> = (0..5)
             .map(|_| {
                 let counter_clone = Arc::clone(&counter);
-                syzygy.spawn(move |cx| {
+                syzygy.spawn(move |_| {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 })
             })
             .collect();
 
-        syzygy.handle_waiting();
+        syzygy.handle_effects();
         // Wait for all threads
         for rx in threads {
             rx.recv().unwrap();

@@ -9,14 +9,14 @@ use std::ops::Deref;
 #[cfg(feature = "async")]
 use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
-use crate::{effect_bus::DispatchEffect, event_bus::EmitEvent, resource::ResourceAccess};
+use crate::{effect_bus::DispatchEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
 pub trait SpawnThread<M>:
-    Into<ThreadContext<M>> + DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
+    Into<ThreadContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
 where
     M: 'static,
 {
@@ -49,7 +49,7 @@ pub enum AsyncTaskError {
 
 #[cfg(feature = "async")]
 pub trait SpawnAsync<M>:
-    Into<AsyncContext<M>> + DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
+    Into<AsyncContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
 where
     M: 'static,
 {
@@ -74,7 +74,7 @@ where
 
 #[cfg(feature = "parallel")]
 pub trait SpawnParallel<M>:
-    Into<ThreadContext<M>> + DispatchEffect<M> + EmitEvent<M> + ResourceAccess + 'static
+    Into<ThreadContext<M>> + DispatchEffect<M> + ResourceAccess + 'static
 where
     M: 'static,
 {
