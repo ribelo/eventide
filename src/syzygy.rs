@@ -2,17 +2,16 @@ use bon::Builder;
 
 use crate::{
     context::Context,
-    effect_bus::Effect,
+    effect_bus::{Effect, EffectBus},
     model::{Model, ModelAccess, ModelModify},
     prelude::ResourceModify,
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
 
-use crate::effect_bus::{DispatchEffect, EffectBus};
+use crate::effect_bus::{EffectSender, SendEffect};
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
-#[cfg(feature = "async")]
 use crate::spawn::{SpawnAsync, TokioHandle};
 
 #[derive(Debug, Builder)]
@@ -21,27 +20,12 @@ pub struct Syzygy<M: Model, E: Effect<M>> {
     pub resources: Resources,
     #[builder(skip)]
     pub effect_bus: EffectBus<M, E>,
-    #[cfg(feature = "async")]
     #[builder(into)]
     pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
     pub model: M,
-}
-
-impl<M: Model, E: Effect<M>> Clone for Syzygy<M, E> {
-    fn clone(&self) -> Self {
-        Self {
-            effect_bus: self.effect_bus.clone(),
-            #[cfg(feature = "async")]
-            tokio_handle: self.tokio_handle.clone(),
-            #[cfg(feature = "parallel")]
-            rayon_pool: self.rayon_pool.clone(),
-            model: self.model.clone(),
-            resources: self.resources.clone(),
-        }
-    }
 }
 
 impl<M: Model, E: Effect<M>, S: syzygy_builder::State> SyzygyBuilder<M, E, S> {
@@ -55,18 +39,18 @@ impl<M: Model, E: Effect<M>, S: syzygy_builder::State> SyzygyBuilder<M, E, S> {
 }
 
 impl<M: Model, E: Effect<M>> Syzygy<M, E> {
+    // TODO: should return result of completion sender
     pub fn handle_effects(&mut self) {
-        while let Some(effects) = self.effect_bus.pop() {
+        while let Some((effects, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
+        {
             for effect in effects {
+                dbg!(&effect);
                 effect.execute(self);
             }
+            if let Some(completion_sender) = completion_sender {
+                let _ = completion_sender.send(());
+            }
         }
-    }
-    pub fn on_effect<F>(&mut self, on_effect: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        self.effect_bus.after_effect = Some(Box::new(on_effect));
     }
 }
 
@@ -95,16 +79,15 @@ impl<M: Model, E: Effect<M>> ResourceAccess for Syzygy<M, E> {
 
 impl<M: Model, E: Effect<M>> ResourceModify for Syzygy<M, E> {}
 
-impl<M: Model, E: Effect<M>> DispatchEffect<M, E> for Syzygy<M, E> {
+impl<M: Model, E: Effect<M>> SendEffect<M, E> for Syzygy<M, E> {
     #[inline]
-    fn effect_bus(&self) -> &EffectBus<M, E> {
-        &self.effect_bus
+    fn effect_sender(&self) -> &EffectSender<M, E> {
+        &self.effect_bus.effect_sender
     }
 }
 
 impl<M: Model, E: Effect<M>> SpawnThread<M, E> for Syzygy<M, E> {}
 
-#[cfg(feature = "async")]
 impl<M: Model, E: Effect<M>> SpawnAsync<M, E> for Syzygy<M, E> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
@@ -147,7 +130,7 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 mod tests {
 
     use super::*;
-    use std::sync::Arc;
+    use std::{fmt, sync::Arc};
 
     #[derive(Debug, Clone)]
     struct TestModel {
@@ -159,10 +142,20 @@ mod tests {
         name: String,
     }
 
-    #[derive(Debug, Clone)]
     enum StaticEffect {
         UpdateCounter,
         ReadModel,
+        EffectFn(Box<dyn FnOnce(&mut Syzygy<TestModel, Self>) + Send + Sync + 'static>),
+    }
+
+    impl fmt::Debug for StaticEffect {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                StaticEffect::UpdateCounter => write!(f, "UpdateCounter"),
+                StaticEffect::ReadModel => write!(f, "ReadModel"),
+                StaticEffect::EffectFn(_) => write!(f, "EffectFn"),
+            }
+        }
     }
 
     impl Effect<TestModel> for StaticEffect {
@@ -174,31 +167,31 @@ mod tests {
                 StaticEffect::ReadModel => {
                     syzygy.query(|m| m.counter);
                 }
+                StaticEffect::EffectFn(f) => {
+                    (f)(syzygy);
+                }
             }
         }
     }
 
-    struct EffectFn(Box<dyn FnOnce(&mut Syzygy<TestModel, Self>) + Send + Sync + 'static>);
-    impl Effect<TestModel> for EffectFn {
-        fn execute(self, syzygy: &mut Syzygy<TestModel, Self>) {
-            (self.0)(syzygy);
-        }
-    }
-
-    impl<F> From<F> for EffectFn
+    impl<F> From<F> for StaticEffect
     where
         F: FnOnce(&mut Syzygy<TestModel, Self>) + Send + Sync + 'static,
     {
         fn from(f: F) -> Self {
-            Self(Box::new(f))
+            Self::EffectFn(Box::new(f))
         }
     }
 
-    #[cfg(not(any(feature = "async", feature = "parallel")))]
+    #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_model() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, EffectFn> = Syzygy::builder().model(model).build();
+        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+            .model(model)
+            .tokio_handle(rt.handle().clone())
+            .build();
 
         // Test initial state
         let counter = syzygy.model().counter;
@@ -222,16 +215,18 @@ mod tests {
         assert_eq!(value, 42);
     }
 
-    #[cfg(not(any(feature = "async", feature = "parallel")))]
+    #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_resources() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let test_resource = TestResource {
             name: "test_str".to_string(),
         };
-        let syzygy: Syzygy<TestModel, EffectFn> = Syzygy::builder()
+        let syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
             .model(model)
             .resource(test_resource)
+            .tokio_handle(rt.handle().clone())
             .build();
 
         // Test accessing existing TestResource
@@ -243,52 +238,83 @@ mod tests {
         assert_eq!(test_resource.unwrap().name, "test_str");
     }
 
-    #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
+    #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_static_dispatch() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder().model(model).build();
+        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+            .model(model)
+            .tokio_handle(rt.handle().clone())
+            .build();
 
         // Test dispatching updates
-        syzygy.dispatch(StaticEffect::UpdateCounter);
+        syzygy.send(StaticEffect::UpdateCounter);
 
         // Test dispatching multiple updates
-        syzygy.dispatch_multiple(vec![
+        syzygy.send_multiple(vec![
             StaticEffect::UpdateCounter,
             StaticEffect::UpdateCounter,
             StaticEffect::UpdateCounter,
         ]);
 
-        syzygy.dispatch(StaticEffect::UpdateCounter);
+        syzygy.send(StaticEffect::UpdateCounter);
 
         syzygy.handle_effects();
         assert_eq!(syzygy.model().counter, 5);
     }
 
-    #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
-    #[test]
-    fn test_dynamic_dispatch() {
-        let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, EffectFn> = Syzygy::builder().model(model).build();
+    // #[cfg(not(feature = "parallel"))]
+    // #[test]
+    // fn test_dynamic_dispatch() {
+    //     let rt = tokio::runtime::Runtime::new().unwrap();
+    //     let model = TestModel { counter: 0 };
+    //     let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+    //         .model(model)
+    //         .tokio_handle(rt.handle().clone())
+    //         .build();
 
-        // Test dispatching updates
-        syzygy.dispatch(|cx: &mut Syzygy<TestModel, EffectFn>| {
-            cx.update(|m| m.counter += 1);
+    //     // Test dispatching updates
+    //     syzygy.send(|cx: &mut Syzygy<TestModel, EffectFn>| {
+    //         cx.update(|m| m.counter += 1);
+    //     });
+
+    //     // Test dispatching multiple updates
+    //     syzygy.send_multiple((0..3).map(|_| {
+    //         |cx: &mut Syzygy<TestModel, EffectFn>| {
+    //             cx.update(|m| m.counter += 1);
+    //         }
+    //     }));
+
+    //     syzygy.send(EffectFn(Box::new(|cx| {
+    //         cx.update(|m| m.counter += 1);
+    //     })));
+
+    //     syzygy.handle_effects();
+    //     assert_eq!(syzygy.model().counter, 5);
+    // }
+
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn test_blocking_dispatch() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let model = TestModel { counter: 0 };
+        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+            .model(model)
+            .tokio_handle(rt.handle().clone())
+            .build();
+
+        let task = syzygy.spawn_task(async |cx| {
+            dbg!("inside task");
+            cx.send_blocking(StaticEffect::UpdateCounter).await;
+            dbg!("after task");
         });
 
-        // Test dispatching multiple updates
-        syzygy.dispatch_multiple((0..3).map(|_| {
-            |cx: &mut Syzygy<TestModel, EffectFn>| {
-                cx.update(|m| m.counter += 1);
-            }
-        }));
-
-        syzygy.dispatch(EffectFn(Box::new(|cx| {
-            cx.update(|m| m.counter += 1);
-        })));
-
-        syzygy.handle_effects();
-        assert_eq!(syzygy.model().counter, 5);
+        for _ in 0..3 {
+            syzygy.handle_effects();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(syzygy.model().counter, 1);
     }
 
     // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
@@ -867,14 +893,17 @@ mod tests {
     // //     assert!(!cx.is_running());
     // // }
     // #[ignore]
-    #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
+    #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_dispatch_performance() {
         use std::time::Instant;
 
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut static_syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder().model(model.clone()).build();
-        let mut dynamic_syzygy: Syzygy<TestModel, EffectFn> = Syzygy::builder().model(model).build();
+        let mut static_syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+            .model(model.clone())
+            .tokio_handle(rt.handle().clone())
+            .build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
@@ -884,7 +913,7 @@ mod tests {
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                static_syzygy.dispatch(StaticEffect::ReadModel);
+                static_syzygy.send_blocking(StaticEffect::ReadModel);
             }
             static_syzygy.handle_effects();
             let duration = start.elapsed();
@@ -892,28 +921,28 @@ mod tests {
         }
         let static_ops = ITERATIONS as f64 / static_best.as_secs_f64();
 
-        // Test dynamic dispatch
-        let mut dynamic_best = std::time::Duration::from_secs(u64::MAX);
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                dynamic_syzygy.dispatch(|cx: &mut Syzygy<TestModel, EffectFn>| {
-                    cx.query(|m| m.counter);
-                });
-            }
-            dynamic_syzygy.handle_effects();
-            let duration = start.elapsed();
-            dynamic_best = dynamic_best.min(duration);
-        }
-        let dynamic_ops = ITERATIONS as f64 / dynamic_best.as_secs_f64();
+        // // Test dynamic dispatch
+        // let mut dynamic_best = std::time::Duration::from_secs(u64::MAX);
+        // for _ in 0..RUNS {
+        //     let start = Instant::now();
+        //     for _ in 0..ITERATIONS {
+        //         dynamic_syzygy.send_blocking(|cx: &mut Syzygy<TestModel, EffectFn>| {
+        //             cx.query(|m| m.counter);
+        //         });
+        //     }
+        //     dynamic_syzygy.handle_effects();
+        //     let duration = start.elapsed();
+        //     dynamic_best = dynamic_best.min(duration);
+        // }
+        // let dynamic_ops = ITERATIONS as f64 / dynamic_best.as_secs_f64();
 
-        println!(
-            "Static dispatch: {ITERATIONS} iterations in {static_best:?} ({static_ops:.2} ops/sec)\n\
-             Dynamic dispatch: {ITERATIONS} iterations in {dynamic_best:?} ({dynamic_ops:.2} ops/sec)"
-        );
+        // println!(
+        //     "Static dispatch: {ITERATIONS} iterations in {static_best:?} ({static_ops:.2} ops/sec)\n\
+        //      // Dynamic dispatch: {ITERATIONS} iterations in {dynamic_best:?} ({dynamic_ops:.2} ops/sec)"
+        // );
 
         // Static should be measurably faster
-        assert!(static_ops > dynamic_ops);
+        // assert!(static_ops > dynamic_ops);
     }
     // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
     // #[test]

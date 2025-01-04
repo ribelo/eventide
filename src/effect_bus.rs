@@ -1,11 +1,9 @@
-use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{model::Model, syzygy::Syzygy};
-use std::marker::PhantomData;
-#[cfg(feature = "async")]
-use std::{future::Future, pin::Pin, task::Poll};
+use std::{fmt, marker::PhantomData};
 
-pub trait Effect<M: Model>: Sized + Send + Sync + 'static {
+pub trait Effect<M: Model>: Sized + Send + Sync + fmt::Debug + 'static {
     fn execute(self, syzygy: &mut Syzygy<M, Self>);
 }
 
@@ -20,173 +18,132 @@ where
     F: FnMut(&mut E) + Send + Sync,
 {
     fn process(&mut self, effect: &mut E) {
-        self(effect)
+        self(effect);
     }
 }
 
 #[derive(Debug)]
-pub struct EffectCompletion {
-    #[cfg(not(feature = "async"))]
-    rx: crossbeam_channel::Receiver<()>,
-    #[cfg(feature = "async")]
-    rx: tokio::sync::oneshot::Receiver<()>,
-}
-
-#[cfg(not(feature = "async"))]
-impl From<crossbeam_channel::Receiver<()>> for EffectCompletion {
-    fn from(rx: crossbeam_channel::Receiver<()>) -> Self {
-        Self { rx }
-    }
-}
-
-#[cfg(feature = "async")]
-impl From<tokio::sync::oneshot::Receiver<()>> for EffectCompletion {
-    fn from(rx: tokio::sync::oneshot::Receiver<()>) -> Self {
-        Self { rx }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum EffectError {
-    #[error("receiver disconnected")]
-    Disconnected,
-}
-
-impl EffectCompletion {
-    pub fn wait(self) -> Result<(), EffectError> {
-        #[cfg(not(feature = "async"))]
-        {
-            self.rx.recv().map_err(|_| EffectError::Disconnected)
-        }
-        #[cfg(feature = "async")]
-        {
-            self.rx
-                .blocking_recv()
-                .map_err(|_| EffectError::Disconnected)
-        }
-    }
-}
-
-#[cfg(feature = "async")]
-impl Future for EffectCompletion {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.rx).poll(cx) {
-            Poll::Ready(_) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-pub struct EffectBus<M: Model, E: Effect<M>> {
-    #[cfg(not(feature = "async"))]
-    pub(crate) tx: crossbeam_channel::Sender<(Vec<E>, crossbeam_channel::Sender<()>)>,
-    #[cfg(not(feature = "async"))]
-    pub(crate) rx: crossbeam_channel::Receiver<(Vec<E>, crossbeam_channel::Sender<()>)>,
-    #[cfg(feature = "async")]
-    pub(crate) tx: crossbeam_channel::Sender<(Vec<E>, tokio::sync::oneshot::Sender<()>)>,
-    #[cfg(feature = "async")]
-    pub(crate) rx: crossbeam_channel::Receiver<(Vec<E>, tokio::sync::oneshot::Sender<()>)>,
-    pub(crate) middlewares: Option<Vec<Box<dyn Middleware<M, E>>>>,
-    pub(crate) after_effect: Option<Box<dyn Fn() + Send + Sync + 'static>>,
+pub struct EffectSender<M: Model, E: Effect<M>> {
+    pub(crate) tx: mpsc::UnboundedSender<(Vec<E>, Option<oneshot::Sender<()>>)>,
     phantom: PhantomData<M>,
 }
 
-impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectBus<M, E> {
+impl<M: Model, E: Effect<M>> Clone for EffectSender<M, E> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            phantom: PhantomData,
+        }
+    }
+}
+
+pub struct EffectReceiver<M: Model, E: Effect<M>> {
+    pub(crate) rx: mpsc::UnboundedReceiver<(Vec<E>, Option<oneshot::Sender<()>>)>,
+    pub(crate) middlewares: Option<Vec<Box<dyn Middleware<M, E>>>>,
+    phantom: PhantomData<M>,
+}
+
+impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectReceiver<M, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EffectBus")
-            .field("tx", &self.tx)
             .field("rx", &self.rx)
             .field("middlewares", &"<middlewares>")
-            .field("after_effect", &self.after_effect.as_ref().map(|_| "<fn>"))
             .field("phantom", &self.phantom)
             .finish()
     }
 }
 
-impl<M: Model, E: Effect<M>> Clone for EffectBus<M, E> {
-    fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-            rx: self.rx.clone(),
-            after_effect: None,
-            middlewares: None,
-            phantom: PhantomData,
-        }
-    }
+#[derive(Debug)]
+pub struct EffectBus<M: Model, E: Effect<M>> {
+    pub(crate) effect_sender: EffectSender<M, E>,
+    pub(crate) effect_receiver: EffectReceiver<M, E>,
 }
 
 impl<M: Model, E: Effect<M>> Default for EffectBus<M, E> {
     fn default() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let effect_sender = EffectSender {
             tx,
+            phantom: PhantomData,
+        };
+        let effect_receiver = EffectReceiver {
             rx,
-            after_effect: None,
             middlewares: None,
             phantom: PhantomData,
+        };
+        Self {
+            effect_sender,
+            effect_receiver,
         }
     }
 }
 
-impl<M: Model, E: Effect<M>> EffectBus<M, E> {
-    pub fn dispatch(&self, effect: impl Into<E>) -> EffectCompletion {
-        let effects = vec![effect.into()];
-        #[cfg(not(feature = "async"))]
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        #[cfg(feature = "async")]
-        let (tx, rx) = tokio::sync::oneshot::channel();
+impl<M: Model, E: Effect<M>> EffectSender<M, E> {
+    pub(crate) fn send(
+        &self,
+        effects: Vec<E>,
+        tx: Option<oneshot::Sender<()>>,
+        rx: Option<oneshot::Receiver<()>>,
+    ) -> Option<oneshot::Receiver<()>> {
+        let effects = effects.into_iter().map(Into::into).collect();
 
         self.tx
             .send((effects, tx))
             .expect("Effect bus channel unexpectedly closed");
-        if let Some(after_effect) = self.after_effect.as_ref() {
-            after_effect();
+        rx.map(Into::into)
+    }
+}
+
+impl<M: Model, E: Effect<M>> EffectReceiver<M, E> {
+    #[must_use]
+    pub(crate) fn next_effect(&mut self) -> Option<(Vec<E>, Option<oneshot::Sender<()>>)> {
+        match self.rx.try_recv() {
+            Ok(effect) => Some(effect),
+            Err(_) => None
         }
-        rx.into()
+    }
+}
+
+pub trait SendEffect<M: Model, E: Effect<M>> {
+    fn effect_sender(&self) -> &EffectSender<M, E>;
+    fn send<T>(&self, effect: T)
+    where
+        T: Into<E>,
+    {
+        self.effect_sender().send(vec![effect.into()], None, None);
     }
 
-    pub fn dispatch_multiple<T>(&self, effects: impl IntoIterator<Item = T>) -> EffectCompletion
+    fn send_blocking<T>(&self, effect: T) -> oneshot::Receiver<()>
+    where
+        T: Into<E>,
+    {
+        let (tx, rx) = oneshot::channel();
+
+        self.effect_sender()
+            .send(vec![effect.into()], Some(tx), Some(rx))
+            .expect("Effect completion failed")
+    }
+
+    fn send_multiple<T>(&self, effects: impl IntoIterator<Item = T>)
     where
         T: Into<E>,
     {
         let effects = effects.into_iter().map(Into::into).collect();
-        #[cfg(not(feature = "async"))]
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        #[cfg(feature = "async")]
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        self.tx
-            .send((effects, tx))
-            .expect("Effect bus channel unexpectedly closed");
-        if let Some(after_effect) = self.after_effect.as_ref() {
-            after_effect();
-        }
-        rx.into()
+        self.effect_sender().send(effects, None, None);
     }
 
-    #[must_use]
-    pub fn pop(&self) -> Option<Vec<E>> {
-        self.rx.try_recv().ok().map(|(effects, tx)| {
-            tx.send(()).ok();
-            effects
-        })
-    }
-}
-
-pub trait DispatchEffect<M: Model, E: Effect<M>> {
-    fn effect_bus(&self) -> &EffectBus<M, E>;
-    fn dispatch<T>(&self, effect: T) -> EffectCompletion
+    fn send_blocking_multiple<T>(
+        &self,
+        effects: impl IntoIterator<Item = T>,
+    ) -> oneshot::Receiver<()>
     where
         T: Into<E>,
     {
-        self.effect_bus().dispatch(effect.into())
-    }
-    fn dispatch_multiple<T>(&self, effects: impl IntoIterator<Item = T>) -> EffectCompletion
-    where
-        T: Into<E>,
-    {
-        self.effect_bus().dispatch_multiple(effects)
+        let effects = effects.into_iter().map(Into::into).collect();
+        let (tx, rx) = oneshot::channel();
+
+        self.effect_sender()
+            .send(effects, Some(tx), Some(rx))
+            .expect("Effect completion failed")
     }
 }

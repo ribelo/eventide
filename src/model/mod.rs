@@ -27,3 +27,7 @@ pub trait ModelModify<M>: ModelAccess<M> {
         f(self.model_mut())
     }
 }
+
+pub trait ModelSnapshot<M: Model> {
+    fn snapshot(&self) -> M;
+}

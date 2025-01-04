@@ -9,15 +9,13 @@ path = "src/lib.rs"
 
 [features]
 default = []
-async = ["dep:tokio"]
 parallel = ["dep:rayon"]
 
 [dependencies]
 thiserror = "1.0"
 rustc-hash = "2"
 rayon = { version = "1.10", optional = true }
-tokio = { version = "1.4", features = ["rt-multi-thread", "sync"], optional = true }
-crossbeam-channel = "0.5"
+tokio = { version = "1.4", features = ["rt-multi-thread", "sync"]}
 downcast-rs = "1.2"
 log = "0.4"
 bon = "3.3.0"
