@@ -58,4 +58,29 @@ pub trait ResourceAccess: Context {
     {
         self.resources().get::<T>()
     }
+    fn with_resource<T, F, R>(&self, f: F) -> R
+    where
+        T: Clone + Send + Sync + 'static,
+        F: FnOnce(&T) -> R,
+    {
+        f(&self.resource::<T>())
+    }
+}
+
+pub trait ResourceModify: ResourceAccess {
+    fn add_resource<T>(&self, value: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.resources().write().expect("Failed to acquire write lock")
+            .insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    fn remove_resource<T>(&self) -> Option<Box<dyn Any + Send + Sync>>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.resources().write().expect("Failed to acquire write lock")
+            .remove(&TypeId::of::<T>())
+    }
 }

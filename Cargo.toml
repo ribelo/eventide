@@ -8,12 +8,9 @@ edition = "2021"
 path = "src/lib.rs"
 
 [features]
-default = ["unsync"]
+default = []
 async = ["dep:tokio"]
 parallel = ["dep:rayon"]
-role = []
-sync = []
-unsync = []
 
 [dependencies]
 thiserror = "1.0"

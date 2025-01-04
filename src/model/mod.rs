@@ -6,7 +6,9 @@ pub trait Model: Clone + Send + Sync + 'static {}
 impl<T> Model for T where T: Clone + Send + Sync + 'static {}
 
 pub trait ModelAccess<M>: Context {
+    #[must_use]
     fn model(&self) -> &M;
+    #[must_use]
     fn query<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&M) -> R,
@@ -16,11 +18,12 @@ pub trait ModelAccess<M>: Context {
 }
 
 pub trait ModelModify<M>: ModelAccess<M> {
+    #[must_use]
     fn model_mut(&mut self) -> &mut M;
-    fn update<F>(&mut self, f: F)
+    fn update<F, R>(&mut self, f: F) -> R
     where
-        F: FnOnce(&mut M),
+        F: FnOnce(&mut M) -> R,
     {
-        f(self.model_mut());
+        f(self.model_mut())
     }
 }
