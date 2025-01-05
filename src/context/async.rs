@@ -12,14 +12,14 @@ use crate::effects::{EffectSender, SendEffect};
 use super::{Context, FromContext};
 
 #[derive(Debug, Builder)]
-pub struct AsyncContext<M: Model, E: Effect<M>> {
+pub struct AsyncContext<M: Model> {
     pub model_snapshot: M,
     pub resources: Resources,
-    pub effect_sender: EffectSender<M, E>,
+    pub effect_sender: EffectSender<M>,
     pub tokio_handle: TokioHandle,
 }
 
-impl<M: Model, E: Effect<M>> Clone for AsyncContext<M, E> {
+impl<M: Model> Clone for AsyncContext<M> {
     fn clone(&self) -> Self {
         Self {
             model_snapshot: self.model_snapshot.clone(),
@@ -30,14 +30,13 @@ impl<M: Model, E: Effect<M>> Clone for AsyncContext<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Context for AsyncContext<M, E> {
+impl<M: Model> Context for AsyncContext<M> {
     type Model = M;
-    type Effect = E;
 }
 
-impl<T, M: Model, E: Effect<M>> FromContext<T> for AsyncContext<M, E>
+impl<T, M: Model> FromContext<T> for AsyncContext<M>
 where
-    T: Context<Model = M, Effect = E>,
+    T: Context<Model = M>,
     T: ModelAccess + ResourceAccess + SendEffect + SpawnAsync,
 {
     fn from_context(context: &T) -> Self {
@@ -50,25 +49,25 @@ where
     }
 }
 
-impl<M: Model, E: Effect<M>> ModelAccess for AsyncContext<M, E> {
+impl<M: Model> ModelAccess for AsyncContext<M> {
     fn model(&self) -> &M {
         &self.model_snapshot
     }
 }
 
-impl<M: Model, E: Effect<M>> ResourceAccess for AsyncContext<M, E> {
+impl<M: Model> ResourceAccess for AsyncContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M: Model, E: Effect<M>> SendEffect for AsyncContext<M, E> {
-    fn effect_sender(&self) -> &EffectSender<M, E> {
+impl<M: Model> SendEffect for AsyncContext<M> {
+    fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_sender
     }
 }
 
-impl<M: Model, E: Effect<M>> SpawnAsync for AsyncContext<M, E> {
+impl<M: Model> SpawnAsync for AsyncContext<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }

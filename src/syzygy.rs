@@ -15,11 +15,11 @@ use crate::spawn::{RayonPool, SpawnParallel};
 use crate::spawn::{SpawnAsync, TokioHandle};
 
 #[derive(Debug, Builder)]
-pub struct Syzygy<M: Model, E: Effect<M>> {
+pub struct Syzygy<M: Model> {
     #[builder(field)]
     pub resources: Resources,
     #[builder(field)]
-    pub effect_bus: EffectQueue<M, E>,
+    pub effect_bus: EffectQueue<M>,
     #[builder(into)]
     pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
@@ -28,15 +28,15 @@ pub struct Syzygy<M: Model, E: Effect<M>> {
     pub model: M,
 }
 
-impl<M: Model, E: Effect<M>, S: syzygy_builder::State> SyzygyBuilder<M, E, S> {
-    pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<M, E, S>
+impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
+    pub fn resource<T>(mut self, resource: T) -> SyzygyBuilder<M, S>
     where
         T: Clone + Send + Sync + 'static,
     {
         self.resources.insert(resource);
         self
     }
-    pub fn effect_hook<H>(mut self, hook: H) -> SyzygyBuilder<M, E, S>
+    pub fn effect_hook<H>(mut self, hook: H) -> SyzygyBuilder<M, S>
     where
         H: Fn() + Send + Sync + 'static,
     {
@@ -45,22 +45,21 @@ impl<M: Model, E: Effect<M>, S: syzygy_builder::State> SyzygyBuilder<M, E, S> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Syzygy<M, E> {
-    fn process_middlewares(&mut self, effects: &mut [E]) {
-        if let Some(middlewares) = &mut self.effect_bus.effect_receiver.middlewares {
-            for effect in effects {
-                for middleware in middlewares.iter_mut() {
-                    middleware.process(effect);
-                }
-            }
-        }
-    }
+impl<M: Model> Syzygy<M> {
+    // fn process_middlewares(&mut self, effects: &mut [E]) {
+    //     if let Some(middlewares) = &mut self.effect_bus.effect_receiver.middlewares {
+    //         for effect in effects {
+    //             for middleware in middlewares.iter_mut() {
+    //                 middleware.process(effect);
+    //             }
+    //         }
+    //     }
+    // }
 
     pub fn handle_effects(&mut self) {
-        while let Some((mut effects, completion_sender)) =
-            self.effect_bus.effect_receiver.next_effect()
+        while let Some((effects, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
         {
-            self.process_middlewares(&mut effects);
+            // self.process_middlewares(&mut effects);
 
             for effect in effects {
                 effect.execute(self);
@@ -72,51 +71,50 @@ impl<M: Model, E: Effect<M>> Syzygy<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Context for Syzygy<M, E> {
+impl<M: Model> Context for Syzygy<M> {
     type Model = M;
-    type Effect = E;
 }
 
-impl<M: Model, E: Effect<M>> ModelAccess for Syzygy<M, E> {
+impl<M: Model> ModelAccess for Syzygy<M> {
     #[inline]
     fn model(&self) -> &M {
         &self.model
     }
 }
 
-impl<M: Model, E: Effect<M>> ModelModify for Syzygy<M, E> {
+impl<M: Model> ModelModify for Syzygy<M> {
     #[inline]
     fn model_mut(&mut self) -> &mut M {
         &mut self.model
     }
 }
 
-impl<M: Model, E: Effect<M>> ResourceAccess for Syzygy<M, E> {
+impl<M: Model> ResourceAccess for Syzygy<M> {
     #[inline]
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M: Model, E: Effect<M>> ResourceModify for Syzygy<M, E> {}
+impl<M: Model> ResourceModify for Syzygy<M> {}
 
-impl<M: Model, E: Effect<M>> SendEffect for Syzygy<M, E> {
+impl<M: Model> SendEffect for Syzygy<M> {
     #[inline]
-    fn effect_sender(&self) -> &EffectSender<M, E> {
+    fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_bus.effect_sender
     }
 }
 
-impl<M: Model, E: Effect<M>> SpawnThread for Syzygy<M, E> {}
+impl<M: Model> SpawnThread for Syzygy<M> {}
 
-impl<M: Model, E: Effect<M>> SpawnAsync for Syzygy<M, E> {
+impl<M: Model> SpawnAsync for Syzygy<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
 }
 
 #[cfg(feature = "parallel")]
-impl<M: Model, E: Effect<M>> SpawnParallel<M, E> for Syzygy<M, E> {
+impl<M: Model> SpawnParallel<M> for Syzygy<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
@@ -163,53 +161,12 @@ mod tests {
         name: String,
     }
 
-    enum StaticEffect {
-        UpdateCounter,
-        ReadModel,
-        EffectFn(Box<dyn FnOnce(&mut Syzygy<TestModel, Self>) + Send + Sync + 'static>),
-    }
-
-    impl fmt::Debug for StaticEffect {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                StaticEffect::UpdateCounter => write!(f, "UpdateCounter"),
-                StaticEffect::ReadModel => write!(f, "ReadModel"),
-                StaticEffect::EffectFn(_) => write!(f, "EffectFn"),
-            }
-        }
-    }
-
-    impl Effect<TestModel> for StaticEffect {
-        fn execute(self, syzygy: &mut Syzygy<TestModel, Self>) {
-            match self {
-                StaticEffect::UpdateCounter => {
-                    syzygy.update(|m| m.counter += 1);
-                }
-                StaticEffect::ReadModel => {
-                    syzygy.query(|m| m.counter);
-                }
-                StaticEffect::EffectFn(f) => {
-                    (f)(syzygy);
-                }
-            }
-        }
-    }
-
-    impl<F> From<F> for StaticEffect
-    where
-        F: FnOnce(&mut Syzygy<TestModel, Self>) + Send + Sync + 'static,
-    {
-        fn from(f: F) -> Self {
-            Self::EffectFn(Box::new(f))
-        }
-    }
-
     #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_model() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
             .tokio_handle(rt.handle().clone())
             .build();
@@ -244,7 +201,7 @@ mod tests {
         let test_resource = TestResource {
             name: "test_str".to_string(),
         };
-        let syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
             .resource(test_resource)
             .tokio_handle(rt.handle().clone())
@@ -261,26 +218,30 @@ mod tests {
 
     #[cfg(not(feature = "parallel"))]
     #[test]
-    fn test_static_dispatch() {
+    fn test_dispatch() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
             .tokio_handle(rt.handle().clone())
             .effect_hook(|| println!("effect hook"))
             .build();
 
         // Test dispatching updates
-        syzygy.dispatch(StaticEffect::UpdateCounter);
+        syzygy.dispatch(|cx| {
+            cx.update(|m| m.counter += 1);
+        });
 
         // Test dispatching multiple updates
         syzygy.dispatch_many(vec![
-            StaticEffect::UpdateCounter,
-            StaticEffect::UpdateCounter,
-            StaticEffect::UpdateCounter,
+            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
+            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
+            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
         ]);
 
-        syzygy.dispatch(StaticEffect::UpdateCounter);
+        syzygy.dispatch(|cx| {
+            cx.update(|m| m.counter += 1);
+        });
 
         syzygy.handle_effects();
         assert_eq!(syzygy.model().counter, 5);

@@ -4,33 +4,42 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{context::Context, model::Model, syzygy::Syzygy};
 use std::{fmt, marker::PhantomData};
 
-pub trait Effect<M: Model>: Sized + Send + Sync + fmt::Debug + 'static {
-    fn execute(self, syzygy: &mut Syzygy<M, Self>);
+pub trait Effect<M: Model>: Send + Sync + 'static {
+    fn execute(self, syzygy: &mut Syzygy<M>);
 }
 
-pub trait Middleware<M: Model, E: Effect<M>>: Send + Sync {
-    fn process(&mut self, effect: &mut E);
-}
-
-impl<M, E, F> Middleware<M, E> for F
+impl<F, M: Model> Effect<M> for F
 where
-    M: Model,
-    E: Effect<M>,
-    F: FnMut(&mut E) + Send + Sync,
+    F: FnMut(&Syzygy<M>) + Send + Sync + 'static,
 {
-    #[inline]
-    fn process(&mut self, effect: &mut E) {
-        self(effect);
+    fn execute(mut self, syzygy: &mut Syzygy<M>) {
+        (self)(syzygy);
     }
 }
 
-pub struct EffectSender<M: Model, E: Effect<M>> {
-    pub(crate) tx: mpsc::UnboundedSender<(Vec<E>, Option<oneshot::Sender<()>>)>,
+// pub trait Middleware<M: Model>: Send + Sync {
+//     fn process(&mut self, effect: &mut E);
+// }
+
+// impl<M, E, F> Middleware<M, E> for F
+// where
+//     M: Model,
+//     E: Effect<M>,
+//     F: FnMut(&mut E) + Send + Sync,
+// {
+//     #[inline]
+//     fn process(&mut self, effect: &mut E) {
+//         self(effect);
+//     }
+// }
+
+pub struct EffectSender<M: Model> {
+    pub(crate) tx: mpsc::UnboundedSender<(Vec<Box<dyn Effect<M>>>, Option<oneshot::Sender<()>>)>,
     pub(crate) effect_hook: Option<Box<dyn Fn() + Send + Sync>>,
     phantom: PhantomData<M>,
 }
 
-impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectSender<M, E> {
+impl<M: Model> std::fmt::Debug for EffectSender<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hook_str = self.effect_hook.as_ref().map_or("None", |_| "<fn>");
 
@@ -42,7 +51,7 @@ impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectSender<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Clone for EffectSender<M, E> {
+impl<M: Model> Clone for EffectSender<M> {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
@@ -52,13 +61,13 @@ impl<M: Model, E: Effect<M>> Clone for EffectSender<M, E> {
     }
 }
 
-pub struct EffectReceiver<M: Model, E: Effect<M>> {
-    pub(crate) rx: mpsc::UnboundedReceiver<(Vec<E>, Option<oneshot::Sender<()>>)>,
-    pub(crate) middlewares: Option<Vec<Box<dyn Middleware<M, E>>>>,
+pub struct EffectReceiver<M: Model> {
+    pub(crate) rx: mpsc::UnboundedReceiver<(Vec<Box<dyn Effect<M>>>, Option<oneshot::Sender<()>>)>,
+    // pub(crate) middlewares: Option<Vec<Box<dyn Middleware<M, E>>>>,
     phantom: PhantomData<M>,
 }
 
-impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectReceiver<M, E> {
+impl<M: Model> std::fmt::Debug for EffectReceiver<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EffectBus")
             .field("rx", &self.rx)
@@ -69,12 +78,12 @@ impl<M: Model, E: Effect<M>> std::fmt::Debug for EffectReceiver<M, E> {
 }
 
 #[derive(Debug, Builder)]
-pub struct EffectQueue<M: Model, E: Effect<M>> {
-    pub(crate) effect_sender: EffectSender<M, E>,
-    pub(crate) effect_receiver: EffectReceiver<M, E>,
+pub struct EffectQueue<M: Model> {
+    pub(crate) effect_sender: EffectSender<M>,
+    pub(crate) effect_receiver: EffectReceiver<M>,
 }
 
-impl<M: Model, E: Effect<M>> Default for EffectQueue<M, E> {
+impl<M: Model> Default for EffectQueue<M> {
     fn default() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let effect_sender = EffectSender {
@@ -84,7 +93,7 @@ impl<M: Model, E: Effect<M>> Default for EffectQueue<M, E> {
         };
         let effect_receiver = EffectReceiver {
             rx,
-            middlewares: None,
+            // middlewares: None,
             phantom: PhantomData,
         };
         Self {
@@ -94,11 +103,11 @@ impl<M: Model, E: Effect<M>> Default for EffectQueue<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> EffectSender<M, E> {
+impl<M: Model> EffectSender<M> {
     #[inline]
     pub fn dispatch(
         &self,
-        effects: Vec<E>,
+        effects: Vec<Box<dyn Effect<M>>>,
         tx: Option<oneshot::Sender<()>>,
         rx: Option<oneshot::Receiver<()>>,
     ) -> Option<oneshot::Receiver<()>> {
@@ -114,10 +123,12 @@ impl<M: Model, E: Effect<M>> EffectSender<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> EffectReceiver<M, E> {
+impl<M: Model> EffectReceiver<M> {
     #[must_use]
     #[inline]
-    pub(crate) fn next_effect(&mut self) -> Option<(Vec<E>, Option<oneshot::Sender<()>>)> {
+    pub(crate) fn next_effect(
+        &mut self,
+    ) -> Option<(Vec<Box<dyn Effect<M>>>, Option<oneshot::Sender<()>>)> {
         match self.rx.try_recv() {
             Ok(effect) => Some(effect),
             Err(_) => None,
@@ -126,34 +137,37 @@ impl<M: Model, E: Effect<M>> EffectReceiver<M, E> {
 }
 
 pub trait SendEffect: Context {
-    fn effect_sender(&self) -> &EffectSender<Self::Model, Self::Effect>;
+    fn effect_sender(&self) -> &EffectSender<Self::Model>;
     #[inline]
-    fn dispatch<T>(&self, effect: T)
+    fn dispatch<E>(&self, effect: E)
     where
-        T: Into<Self::Effect>,
+        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         self.effect_sender()
-            .dispatch(vec![effect.into()], None, None);
+            .dispatch(vec![Box::new(effect)], None, None);
     }
 
     #[inline]
-    fn dispatch_awaitable<T>(&self, effect: T) -> oneshot::Receiver<()>
+    fn dispatch_awaitable<E>(&self, effect: E) -> oneshot::Receiver<()>
     where
-        T: Into<Self::Effect>,
+        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         let (tx, rx) = oneshot::channel();
 
         self.effect_sender()
-            .dispatch(vec![effect.into()], Some(tx), Some(rx))
+            .dispatch(vec![Box::new(effect)], Some(tx), Some(rx))
             .expect("Effect completion failed")
     }
 
     #[inline]
-    fn dispatch_many<T>(&self, effects: impl IntoIterator<Item = T>)
+    fn dispatch_many<E>(&self, effects: impl IntoIterator<Item = E>)
     where
-        T: Into<Self::Effect>,
+        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
     {
-        let effects = effects.into_iter().map(Into::into).collect();
+        let effects = effects
+            .into_iter()
+            .map(|e| Box::new(e) as Box<dyn Effect<Self::Model>>)
+            .collect();
         self.effect_sender().dispatch(effects, None, None);
     }
 
@@ -163,9 +177,12 @@ pub trait SendEffect: Context {
         effects: impl IntoIterator<Item = T>,
     ) -> oneshot::Receiver<()>
     where
-        T: Into<Self::Effect>,
+        T: Effect<Self::Model>,
     {
-        let effects = effects.into_iter().map(Into::into).collect();
+        let effects = effects
+            .into_iter()
+            .map(|e| Box::new(e) as Box<dyn Effect<Self::Model>>)
+            .collect();
         let (tx, rx) = oneshot::channel();
 
         self.effect_sender()

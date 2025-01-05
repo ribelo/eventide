@@ -5,7 +5,6 @@ pub mod thread;
 
 pub trait Context: Sized {
     type Model: Model;
-    type Effect: Effect<Self::Model>;
 }
 
 pub trait FromContext<T>: Context {

@@ -8,9 +8,8 @@ use tokio::sync::oneshot;
 
 use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
-use crate::context::{Context, FromContext};
-use crate::effects::Effect;
-use crate::model::{Model, ModelAccess};
+use crate::context::FromContext;
+use crate::model::ModelAccess;
 use crate::{effects::SendEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,7 +19,7 @@ pub struct SpawnTaskError(#[from] std::io::Error);
 pub trait SpawnThread: ModelAccess + ResourceAccess + SendEffect {
     fn spawn<H, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(ThreadContext<Self::Model, Self::Effect>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<Self::Model>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
@@ -46,9 +45,10 @@ pub enum AsyncTaskError {
 
 pub trait SpawnAsync: ModelAccess + ResourceAccess + SendEffect {
     fn tokio_handle(&self) -> &TokioHandle;
+
     fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        H: FnOnce(AsyncContext<Self::Model, Self::Effect>) -> Fut + Send + Sync + 'static,
+        H: FnOnce(AsyncContext<Self::Model>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
@@ -65,13 +65,12 @@ pub trait SpawnAsync: ModelAccess + ResourceAccess + SendEffect {
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel<M: Model, E: Effect<M>>:
-    Into<ThreadContext<M, E>> + SendEffect<M, E> + ResourceAccess + 'static
-{
+pub trait SpawnParallel<M: Model>: Into<ThreadContext<M>> + SendEffect + ResourceAccess + 'static {
     fn rayon_pool(&self) -> &RayonPool;
+
     fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
     where
-        H: FnOnce(ThreadContext<M, E>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<M>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
