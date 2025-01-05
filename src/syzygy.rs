@@ -905,88 +905,40 @@ mod tests {
 
         println!("Dynamic dispatch: {ITERATIONS} iterations in {best:?} ({ops:.2} ops/sec)");
     }
-    // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
-    // #[test]
-    // fn benchmark_direct_model_update() {
-    //     use std::time::Instant;
+    #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
+    #[test]
+    fn benchmark_direct_model_update() {
+        use std::time::Instant;
 
-    //     let model = TestModel { counter: 0 };
-    //     let mut syzygy = Syzygy::builder().model(model).build();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let model = TestModel { counter: 0 };
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
+            .model(model)
+            .tokio_handle(rt.handle().clone())
+            .build();
 
-    //     const ITERATIONS: usize = 1_000_000;
-    //     const RUNS: usize = 10;
+        const ITERATIONS: usize = 1_000_000;
+        const RUNS: usize = 10;
 
-    //     let mut best_duration = std::time::Duration::from_secs(u64::MAX);
+        let mut best_duration = std::time::Duration::from_secs(u64::MAX);
 
-    //     for _ in 0..RUNS {
-    //         let start = Instant::now();
+        for _ in 0..RUNS {
+            let start = Instant::now();
 
-    //         for _ in 0..ITERATIONS {
-    //             syzygy.update(|m| m.counter += 1);
-    //         }
+            for _ in 0..ITERATIONS {
+                syzygy.update(|m| m.counter += 1);
+            }
 
-    //         let duration = start.elapsed();
-    //         best_duration = best_duration.min(duration);
-    //     }
+            let duration = start.elapsed();
+            best_duration = best_duration.min(duration);
+        }
 
-    //     let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
+        let ops_per_sec = ITERATIONS as f64 / best_duration.as_secs_f64();
 
-    //     println!(
-    //         "Direct model update benchmark:\n\
-    //          {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
-    //          {ops_per_sec:.2} ops/sec",
-    //     );
-    // }
-    // // #[test]
-    // // fn test_event() {
-    // //     let model = TestModel { counter: 0 };
-    // //     let cx = GlobalAppContext::builder(model).build();
-    // //     cx.run();
-
-    // //     #[derive(Debug)]
-    // //     struct TestEvent {
-    // //         value: i32,
-    // //     }
-
-    // //     let event_fired = Arc::new(AtomicBool::new(false));
-    // //     let event_fired_clone = Arc::clone(&event_fired);
-
-    // //     cx.on(move |cx, event: &TestEvent| {
-    // //         assert_eq!(event.value, 42);
-    // //         cx.update(|m| m.counter = event.value);
-    // //         event_fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-    // //     });
-
-    // //     let event = TestEvent { value: 42 };
-    // //     cx.dispatch(move |cx: Syzygy<App, TestModel>| {
-    // //         cx.emit(event).unwrap();
-    // //     });
-
-    // //     std::thread::sleep(std::time::Duration::from_millis(100));
-    // //     assert!(event_fired.load(std::sync::atomic::Ordering::SeqCst));
-    // //     assert_eq!(cx.query(|m| m.counter), 42);
-
-    // //     cx.graceful_stop().unwrap();
-    // //     cx.wait_for_stop().unwrap();
-    // // }
-
-    // // #[test]
-    // // fn test_from_context() {
-    // //     let model = TestModel { counter: 0 };
-    // //     let cx = Syzygy::builder(model).build();
-
-    // //     #[derive(Debug)]
-    // //     struct TestContext<M: Model> {
-    // //         cx: Syzygy<App, M>,
-    // //     }
-
-    // //     impl<M: Model> FromContext<App, M> for TestContext<M> {
-
-    // //         fn from_context(cx: Syzygy<App, M>) -> Self {
-    // //             Self { cx }
-    // //         }
-    // //     }
-
-    // //     dbg!(cx.context::<TestContext<_>>());
-    // // }
+        println!(
+            "Direct model update benchmark:\n\
+             {ITERATIONS} iterations in {best_duration:?} (best of {RUNS} runs)\n\
+             {ops_per_sec:.2} ops/sec",
+        );
+    }
 }
