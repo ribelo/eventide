@@ -2,18 +2,18 @@ use bon::Builder;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{context::Context, model::Model, syzygy::Syzygy};
-use std::{fmt, marker::PhantomData};
+use std::marker::PhantomData;
 
 pub trait Effect<M: Model>: Send + Sync + 'static {
-    fn execute(self, syzygy: &mut Syzygy<M>);
+    fn execute(self: Box<Self>, syzygy: &mut Syzygy<M>);
 }
 
 impl<F, M: Model> Effect<M> for F
 where
-    F: FnMut(&Syzygy<M>) + Send + Sync + 'static,
+    F: FnOnce(&mut Syzygy<M>) + Send + Sync + 'static,
 {
-    fn execute(mut self, syzygy: &mut Syzygy<M>) {
-        (self)(syzygy);
+    fn execute(self: Box<Self>, syzygy: &mut Syzygy<M>) {
+        (*self)(syzygy);
     }
 }
 
@@ -141,7 +141,7 @@ pub trait SendEffect: Context {
     #[inline]
     fn dispatch<E>(&self, effect: E)
     where
-        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
+        E: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         self.effect_sender()
             .dispatch(vec![Box::new(effect)], None, None);
@@ -150,7 +150,7 @@ pub trait SendEffect: Context {
     #[inline]
     fn dispatch_awaitable<E>(&self, effect: E) -> oneshot::Receiver<()>
     where
-        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
+        E: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         let (tx, rx) = oneshot::channel();
 
@@ -162,7 +162,7 @@ pub trait SendEffect: Context {
     #[inline]
     fn dispatch_many<E>(&self, effects: impl IntoIterator<Item = E>)
     where
-        E: FnMut(&Syzygy<Self::Model>) + Send + Sync + 'static,
+        E: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         let effects = effects
             .into_iter()
@@ -172,12 +172,12 @@ pub trait SendEffect: Context {
     }
 
     #[inline]
-    fn dispatch_many_awaitable<T>(
+    fn dispatch_many_awaitable<E>(
         &self,
-        effects: impl IntoIterator<Item = T>,
+        effects: impl IntoIterator<Item = E>,
     ) -> oneshot::Receiver<()>
     where
-        T: Effect<Self::Model>,
+        E: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
     {
         let effects = effects
             .into_iter()

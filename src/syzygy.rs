@@ -2,7 +2,7 @@ use bon::Builder;
 
 use crate::{
     context::Context,
-    effects::{Effect, EffectQueue},
+    effects::EffectQueue,
     model::{Model, ModelAccess, ModelModify},
     prelude::ResourceModify,
     resource::{ResourceAccess, Resources},
@@ -234,9 +234,9 @@ mod tests {
 
         // Test dispatching multiple updates
         syzygy.dispatch_many(vec![
-            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
-            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
-            |cx: &Syzygy<TestModel>| cx.update(|m| m.counter += 1),
+            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
+            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
+            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
         ]);
 
         syzygy.dispatch(|cx| {
@@ -282,13 +282,14 @@ mod tests {
     fn test_blocking_dispatch() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
             .tokio_handle(rt.handle().clone())
             .build();
 
         syzygy.spawn_task(async |cx| {
-            cx.dispatch_awaitable(StaticEffect::UpdateCounter).await;
+            cx.dispatch_awaitable(|cx| cx.update(|model| model.counter += 1))
+                .await;
         });
 
         for _ in 0..3 {
@@ -881,7 +882,7 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model.clone())
             .tokio_handle(rt.handle().clone())
             .build();
@@ -889,41 +890,20 @@ mod tests {
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
 
-        // Test static dispatch
-        let mut static_best = std::time::Duration::from_secs(u64::MAX);
+        // Test dispatch
+        let mut best = std::time::Duration::from_secs(u64::MAX);
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                syzygy.dispatch_awaitable(StaticEffect::ReadModel);
+                syzygy.dispatch(|cx| {});
             }
             syzygy.handle_effects();
             let duration = start.elapsed();
-            static_best = static_best.min(duration);
+            best = best.min(duration);
         }
-        let static_ops = ITERATIONS as f64 / static_best.as_secs_f64();
+        let ops = ITERATIONS as f64 / best.as_secs_f64();
 
-        // Test dynamic dispatch
-        let mut dynamic_best = std::time::Duration::from_secs(u64::MAX);
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                syzygy.dispatch_awaitable(|cx: &mut Syzygy<TestModel, StaticEffect>| {
-                    cx.query(|m| m.counter);
-                });
-            }
-            syzygy.handle_effects();
-            let duration = start.elapsed();
-            dynamic_best = dynamic_best.min(duration);
-        }
-        let dynamic_ops = ITERATIONS as f64 / dynamic_best.as_secs_f64();
-
-        println!(
-            "Static dispatch: {ITERATIONS} iterations in {static_best:?} ({static_ops:.2} ops/sec)\n\
-             // Dynamic dispatch: {ITERATIONS} iterations in {dynamic_best:?} ({dynamic_ops:.2} ops/sec)"
-        );
-
-        // Static should be measurably faster
-        assert!(static_ops > dynamic_ops);
+        println!("Dynamic dispatch: {ITERATIONS} iterations in {best:?} ({ops:.2} ops/sec)");
     }
     // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
     // #[test]
