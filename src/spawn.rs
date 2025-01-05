@@ -8,23 +8,23 @@ use tokio::sync::oneshot;
 
 use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
-use crate::context::IntoContext;
-use crate::effect_bus::Effect;
-use crate::model::Model;
-use crate::{effect_bus::SendEffect, resource::ResourceAccess};
+use crate::context::{Context, FromContext};
+use crate::effects::Effect;
+use crate::model::{Model, ModelAccess};
+use crate::{effects::SendEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread<M: Model, E: Effect<M>>: IntoContext<ThreadContext<M, E>> + 'static {
+pub trait SpawnThread: ModelAccess + ResourceAccess + SendEffect {
     fn spawn<H, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(ThreadContext<M, E>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<Self::Model, Self::Effect>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
-        let ctx = self.into_context();
+        let ctx = ThreadContext::from_context(self);
         std::thread::spawn(move || {
             let result = (handler)(ctx);
             let _ = tx.send(result);
@@ -44,16 +44,16 @@ pub enum AsyncTaskError {
     ReceiveError,
 }
 
-pub trait SpawnAsync<M: Model, E: Effect<M>>: IntoContext<AsyncContext<M, E>> + 'static {
+pub trait SpawnAsync: ModelAccess + ResourceAccess + SendEffect {
     fn tokio_handle(&self) -> &TokioHandle;
     fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
     where
-        H: FnOnce(AsyncContext<M, E>) -> Fut + Send + Sync + 'static,
+        H: FnOnce(AsyncContext<Self::Model, Self::Effect>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let ctx = self.into_context();
+        let ctx = AsyncContext::from_context(self);
 
         self.tokio_handle().spawn(async move {
             let result = (handler)(ctx).await;

@@ -1,6 +1,6 @@
 #![feature(downcast_unchecked)]
 pub mod context;
-pub mod effect_bus;
+pub mod effects;
 pub mod model;
 pub mod resource;
 pub mod spawn;
@@ -8,7 +8,7 @@ pub mod syzygy;
 
 pub mod prelude {
     pub use crate::context::Context;
-    pub use crate::effect_bus::{SendEffect, EffectSender};
+    pub use crate::effects::{SendEffect, EffectSender, Effect};
     pub use crate::model::{ModelAccess, ModelModify};
     pub use crate::resource::{ResourceAccess, ResourceModify, Resources};
     pub use crate::spawn::SpawnThread;

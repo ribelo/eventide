@@ -1,5 +1,5 @@
 use crate::{
-    effect_bus::Effect,
+    effects::Effect,
     model::{Model, ModelAccess},
     resource::{ResourceAccess, Resources},
     spawn::{SpawnAsync, TokioHandle},
@@ -7,9 +7,9 @@ use crate::{
 
 use bon::Builder;
 
-use crate::effect_bus::{EffectSender, SendEffect};
+use crate::effects::{EffectSender, SendEffect};
 
-use super::{Context, IntoContext};
+use super::{Context, FromContext};
 
 #[derive(Debug, Builder)]
 pub struct AsyncContext<M: Model, E: Effect<M>> {
@@ -30,23 +30,27 @@ impl<M: Model, E: Effect<M>> Clone for AsyncContext<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Context for AsyncContext<M, E> {}
+impl<M: Model, E: Effect<M>> Context for AsyncContext<M, E> {
+    type Model = M;
+    type Effect = E;
+}
 
-impl<T, M: Model, E: Effect<M>> IntoContext<AsyncContext<M, E>> for T
+impl<T, M: Model, E: Effect<M>> FromContext<T> for AsyncContext<M, E>
 where
-    T: ModelAccess<M> + ResourceAccess + SendEffect<M, E> + SpawnAsync<M, E>,
+    T: Context<Model = M, Effect = E>,
+    T: ModelAccess + ResourceAccess + SendEffect + SpawnAsync,
 {
-    fn into_context(&self) -> AsyncContext<M, E> {
-        AsyncContext {
-            model_snapshot: self.model().clone(),
-            resources: self.resources().clone(),
-            effect_sender: self.effect_sender().clone(),
-            tokio_handle: self.tokio_handle().clone(),
+    fn from_context(context: &T) -> Self {
+        Self {
+            model_snapshot: context.model().clone(),
+            resources: context.resources().clone(),
+            effect_sender: context.effect_sender().clone(),
+            tokio_handle: context.tokio_handle().clone(),
         }
     }
 }
 
-impl<M: Model, E: Effect<M>> ModelAccess<M> for AsyncContext<M, E> {
+impl<M: Model, E: Effect<M>> ModelAccess for AsyncContext<M, E> {
     fn model(&self) -> &M {
         &self.model_snapshot
     }
@@ -58,13 +62,13 @@ impl<M: Model, E: Effect<M>> ResourceAccess for AsyncContext<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> SendEffect<M, E> for AsyncContext<M, E> {
+impl<M: Model, E: Effect<M>> SendEffect for AsyncContext<M, E> {
     fn effect_sender(&self) -> &EffectSender<M, E> {
         &self.effect_sender
     }
 }
 
-impl<M: Model, E: Effect<M>> SpawnAsync<M, E> for AsyncContext<M, E> {
+impl<M: Model, E: Effect<M>> SpawnAsync for AsyncContext<M, E> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }

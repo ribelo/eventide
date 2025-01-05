@@ -2,14 +2,14 @@ use bon::Builder;
 
 use crate::{
     context::Context,
-    effect_bus::{Effect, EffectBus},
+    effects::{Effect, EffectQueue},
     model::{Model, ModelAccess, ModelModify},
     prelude::ResourceModify,
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
 
-use crate::effect_bus::{EffectSender, SendEffect};
+use crate::effects::{EffectSender, SendEffect};
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
 use crate::spawn::{SpawnAsync, TokioHandle};
@@ -18,8 +18,8 @@ use crate::spawn::{SpawnAsync, TokioHandle};
 pub struct Syzygy<M: Model, E: Effect<M>> {
     #[builder(field)]
     pub resources: Resources,
-    #[builder(skip)]
-    pub effect_bus: EffectBus<M, E>,
+    #[builder(field)]
+    pub effect_bus: EffectQueue<M, E>,
     #[builder(into)]
     pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
@@ -36,15 +36,33 @@ impl<M: Model, E: Effect<M>, S: syzygy_builder::State> SyzygyBuilder<M, E, S> {
         self.resources.insert(resource);
         self
     }
+    pub fn effect_hook<H>(mut self, hook: H) -> SyzygyBuilder<M, E, S>
+    where
+        H: Fn() + Send + Sync + 'static,
+    {
+        self.effect_bus.effect_sender.effect_hook = Some(Box::new(hook));
+        self
+    }
 }
 
 impl<M: Model, E: Effect<M>> Syzygy<M, E> {
-    // TODO: should return result of completion sender
-    pub fn handle_effects(&mut self) {
-        while let Some((effects, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
-        {
+    fn process_middlewares(&mut self, effects: &mut [E]) {
+        if let Some(middlewares) = &mut self.effect_bus.effect_receiver.middlewares {
             for effect in effects {
-                dbg!(&effect);
+                for middleware in middlewares.iter_mut() {
+                    middleware.process(effect);
+                }
+            }
+        }
+    }
+
+    pub fn handle_effects(&mut self) {
+        while let Some((mut effects, completion_sender)) =
+            self.effect_bus.effect_receiver.next_effect()
+        {
+            self.process_middlewares(&mut effects);
+
+            for effect in effects {
                 effect.execute(self);
             }
             if let Some(completion_sender) = completion_sender {
@@ -54,16 +72,19 @@ impl<M: Model, E: Effect<M>> Syzygy<M, E> {
     }
 }
 
-impl<M: Model, E: Effect<M>> Context for Syzygy<M, E> {}
+impl<M: Model, E: Effect<M>> Context for Syzygy<M, E> {
+    type Model = M;
+    type Effect = E;
+}
 
-impl<M: Model, E: Effect<M>> ModelAccess<M> for Syzygy<M, E> {
+impl<M: Model, E: Effect<M>> ModelAccess for Syzygy<M, E> {
     #[inline]
     fn model(&self) -> &M {
         &self.model
     }
 }
 
-impl<M: Model, E: Effect<M>> ModelModify<M> for Syzygy<M, E> {
+impl<M: Model, E: Effect<M>> ModelModify for Syzygy<M, E> {
     #[inline]
     fn model_mut(&mut self) -> &mut M {
         &mut self.model
@@ -79,16 +100,16 @@ impl<M: Model, E: Effect<M>> ResourceAccess for Syzygy<M, E> {
 
 impl<M: Model, E: Effect<M>> ResourceModify for Syzygy<M, E> {}
 
-impl<M: Model, E: Effect<M>> SendEffect<M, E> for Syzygy<M, E> {
+impl<M: Model, E: Effect<M>> SendEffect for Syzygy<M, E> {
     #[inline]
     fn effect_sender(&self) -> &EffectSender<M, E> {
         &self.effect_bus.effect_sender
     }
 }
 
-impl<M: Model, E: Effect<M>> SpawnThread<M, E> for Syzygy<M, E> {}
+impl<M: Model, E: Effect<M>> SpawnThread for Syzygy<M, E> {}
 
-impl<M: Model, E: Effect<M>> SpawnAsync<M, E> for Syzygy<M, E> {
+impl<M: Model, E: Effect<M>> SpawnAsync for Syzygy<M, E> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }
@@ -246,19 +267,20 @@ mod tests {
         let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
             .model(model)
             .tokio_handle(rt.handle().clone())
+            .effect_hook(|| println!("effect hook"))
             .build();
 
         // Test dispatching updates
-        syzygy.send(StaticEffect::UpdateCounter);
+        syzygy.dispatch(StaticEffect::UpdateCounter);
 
         // Test dispatching multiple updates
-        syzygy.send_multiple(vec![
+        syzygy.dispatch_many(vec![
             StaticEffect::UpdateCounter,
             StaticEffect::UpdateCounter,
             StaticEffect::UpdateCounter,
         ]);
 
-        syzygy.send(StaticEffect::UpdateCounter);
+        syzygy.dispatch(StaticEffect::UpdateCounter);
 
         syzygy.handle_effects();
         assert_eq!(syzygy.model().counter, 5);
@@ -304,10 +326,8 @@ mod tests {
             .tokio_handle(rt.handle().clone())
             .build();
 
-        let task = syzygy.spawn_task(async |cx| {
-            dbg!("inside task");
-            cx.send_blocking(StaticEffect::UpdateCounter).await;
-            dbg!("after task");
+        syzygy.spawn_task(async |cx| {
+            cx.dispatch_awaitable(StaticEffect::UpdateCounter).await;
         });
 
         for _ in 0..3 {
@@ -900,7 +920,7 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
-        let mut static_syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
+        let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
             .model(model.clone())
             .tokio_handle(rt.handle().clone())
             .build();
@@ -913,36 +933,36 @@ mod tests {
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                static_syzygy.send_blocking(StaticEffect::ReadModel);
+                syzygy.dispatch_awaitable(StaticEffect::ReadModel);
             }
-            static_syzygy.handle_effects();
+            syzygy.handle_effects();
             let duration = start.elapsed();
             static_best = static_best.min(duration);
         }
         let static_ops = ITERATIONS as f64 / static_best.as_secs_f64();
 
-        // // Test dynamic dispatch
-        // let mut dynamic_best = std::time::Duration::from_secs(u64::MAX);
-        // for _ in 0..RUNS {
-        //     let start = Instant::now();
-        //     for _ in 0..ITERATIONS {
-        //         dynamic_syzygy.send_blocking(|cx: &mut Syzygy<TestModel, EffectFn>| {
-        //             cx.query(|m| m.counter);
-        //         });
-        //     }
-        //     dynamic_syzygy.handle_effects();
-        //     let duration = start.elapsed();
-        //     dynamic_best = dynamic_best.min(duration);
-        // }
-        // let dynamic_ops = ITERATIONS as f64 / dynamic_best.as_secs_f64();
+        // Test dynamic dispatch
+        let mut dynamic_best = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                syzygy.dispatch_awaitable(|cx: &mut Syzygy<TestModel, StaticEffect>| {
+                    cx.query(|m| m.counter);
+                });
+            }
+            syzygy.handle_effects();
+            let duration = start.elapsed();
+            dynamic_best = dynamic_best.min(duration);
+        }
+        let dynamic_ops = ITERATIONS as f64 / dynamic_best.as_secs_f64();
 
-        // println!(
-        //     "Static dispatch: {ITERATIONS} iterations in {static_best:?} ({static_ops:.2} ops/sec)\n\
-        //      // Dynamic dispatch: {ITERATIONS} iterations in {dynamic_best:?} ({dynamic_ops:.2} ops/sec)"
-        // );
+        println!(
+            "Static dispatch: {ITERATIONS} iterations in {static_best:?} ({static_ops:.2} ops/sec)\n\
+             // Dynamic dispatch: {ITERATIONS} iterations in {dynamic_best:?} ({dynamic_ops:.2} ops/sec)"
+        );
 
         // Static should be measurably faster
-        // assert!(static_ops > dynamic_ops);
+        assert!(static_ops > dynamic_ops);
     }
     // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
     // #[test]
