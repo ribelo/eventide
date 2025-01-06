@@ -1,5 +1,5 @@
 use crate::{
-    effects::{Effect, EffectSender, SendEffect},
+    effects::{Effect, EffectSender, DispatchEffect},
     model::{Model, ModelAccess},
     resource::{ResourceAccess, Resources},
 };
@@ -38,7 +38,7 @@ impl<M: Model> Context for ThreadContext<M> {
 impl<T, M: Model> FromContext<T> for ThreadContext<M>
 where
     T: Context<Model = M>,
-    T: ModelAccess + ResourceAccess + SendEffect + SpawnThread,
+    T: ModelAccess + ResourceAccess + DispatchEffect + SpawnThread,
 {
     fn from_context(context: &T) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl<M: Model> ResourceAccess for ThreadContext<M> {
     }
 }
 
-impl<M: Model> SendEffect for ThreadContext<M> {
+impl<M: Model> DispatchEffect for ThreadContext<M> {
     fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_sender
     }

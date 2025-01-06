@@ -7,7 +7,7 @@ use crate::{
 
 use bon::Builder;
 
-use crate::effects::{EffectSender, SendEffect};
+use crate::effects::{EffectSender, DispatchEffect};
 
 use super::{Context, FromContext};
 
@@ -37,7 +37,7 @@ impl<M: Model> Context for AsyncContext<M> {
 impl<T, M: Model> FromContext<T> for AsyncContext<M>
 where
     T: Context<Model = M>,
-    T: ModelAccess + ResourceAccess + SendEffect + SpawnAsync,
+    T: ModelAccess + ResourceAccess + DispatchEffect + SpawnAsync,
 {
     fn from_context(context: &T) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl<M: Model> ResourceAccess for AsyncContext<M> {
     }
 }
 
-impl<M: Model> SendEffect for AsyncContext<M> {
+impl<M: Model> DispatchEffect for AsyncContext<M> {
     fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_sender
     }

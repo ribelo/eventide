@@ -17,22 +17,6 @@ where
     }
 }
 
-// pub trait Middleware<M: Model>: Send + Sync {
-//     fn process(&mut self, effect: &mut E);
-// }
-
-// impl<M, E, F> Middleware<M, E> for F
-// where
-//     M: Model,
-//     E: Effect<M>,
-//     F: FnMut(&mut E) + Send + Sync,
-// {
-//     #[inline]
-//     fn process(&mut self, effect: &mut E) {
-//         self(effect);
-//     }
-// }
-
 pub struct EffectSender<M: Model> {
     pub(crate) tx: mpsc::UnboundedSender<(Vec<Box<dyn Effect<M>>>, Option<oneshot::Sender<()>>)>,
     pub(crate) effect_hook: Option<Box<dyn Fn() + Send + Sync>>,
@@ -63,7 +47,6 @@ impl<M: Model> Clone for EffectSender<M> {
 
 pub struct EffectReceiver<M: Model> {
     pub(crate) rx: mpsc::UnboundedReceiver<(Vec<Box<dyn Effect<M>>>, Option<oneshot::Sender<()>>)>,
-    // pub(crate) middlewares: Option<Vec<Box<dyn Middleware<M, E>>>>,
     phantom: PhantomData<M>,
 }
 
@@ -136,7 +119,7 @@ impl<M: Model> EffectReceiver<M> {
     }
 }
 
-pub trait SendEffect: Context {
+pub trait DispatchEffect: Context {
     fn effect_sender(&self) -> &EffectSender<Self::Model>;
     #[inline]
     fn dispatch<E>(&self, effect: E)

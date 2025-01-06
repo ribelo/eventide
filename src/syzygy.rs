@@ -9,7 +9,7 @@ use crate::{
     spawn::SpawnThread,
 };
 
-use crate::effects::{EffectSender, SendEffect};
+use crate::effects::{DispatchEffect, EffectSender};
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
 use crate::spawn::{SpawnAsync, TokioHandle};
@@ -46,15 +46,12 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 }
 
 impl<M: Model> Syzygy<M> {
-    // fn process_middlewares(&mut self, effects: &mut [E]) {
-    //     if let Some(middlewares) = &mut self.effect_bus.effect_receiver.middlewares {
-    //         for effect in effects {
-    //             for middleware in middlewares.iter_mut() {
-    //                 middleware.process(effect);
-    //             }
-    //         }
-    //     }
-    // }
+    pub fn effect_hook<H>(&mut self, hook: H)
+    where
+        H: Fn() + Send + Sync + 'static,
+    {
+        self.effect_bus.effect_sender.effect_hook = Some(Box::new(hook));
+    }
 
     pub fn handle_effects(&mut self) {
         while let Some((effects, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
@@ -98,7 +95,7 @@ impl<M: Model> ResourceAccess for Syzygy<M> {
 
 impl<M: Model> ResourceModify for Syzygy<M> {}
 
-impl<M: Model> SendEffect for Syzygy<M> {
+impl<M: Model> DispatchEffect for Syzygy<M> {
     #[inline]
     fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_bus.effect_sender
