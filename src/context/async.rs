@@ -1,5 +1,5 @@
 use crate::{
-    effects::Effect,
+    dispatch::Effect,
     model::{Model, ModelAccess},
     resource::{ResourceAccess, Resources},
     spawn::{SpawnAsync, TokioHandle},
@@ -7,7 +7,7 @@ use crate::{
 
 use bon::Builder;
 
-use crate::effects::{EffectSender, DispatchEffect};
+use crate::dispatch::{EffectSender, DispatchEffect};
 
 use super::{Context, FromContext};
 

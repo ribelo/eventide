@@ -10,7 +10,7 @@ use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
 use crate::context::FromContext;
 use crate::model::ModelAccess;
-use crate::{effects::DispatchEffect, resource::ResourceAccess};
+use crate::{dispatch::DispatchEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
@@ -46,13 +46,13 @@ pub enum AsyncTaskError {
 pub trait SpawnAsync: ModelAccess + ResourceAccess + DispatchEffect {
     fn tokio_handle(&self) -> &TokioHandle;
 
-    fn spawn_task<H, Fut, R>(&self, handler: H) -> tokio::sync::oneshot::Receiver<R>
+    fn spawn_task<H, Fut, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
         H: FnOnce(AsyncContext<Self::Model>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let ctx = AsyncContext::from_context(self);
 
         self.tokio_handle().spawn(async move {
@@ -65,16 +65,16 @@ pub trait SpawnAsync: ModelAccess + ResourceAccess + DispatchEffect {
 }
 
 #[cfg(feature = "parallel")]
-pub trait SpawnParallel<M: Model>: Into<ThreadContext<M>> + DispatchEffect + ResourceAccess + 'static {
+pub trait SpawnParallel: ModelAccess + ResourceAccess + DispatchEffect + SpawnThread {
     fn rayon_pool(&self) -> &RayonPool;
 
-    fn spawn_parallel<H, R>(&self, handler: H) -> crossbeam_channel::Receiver<R>
+    fn spawn_parallel<H, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(ThreadContext<M>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<Self::Model>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let ctx = self.clone().into();
+        let (tx, rx) = oneshot::channel();
+        let ctx = ThreadContext::from_context(self);
 
         self.rayon_pool().spawn(move || {
             let result = (handler)(ctx);

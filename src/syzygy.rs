@@ -1,15 +1,15 @@
 use bon::Builder;
 
 use crate::{
-    context::Context,
-    effects::EffectQueue,
+    context::{effect::EffectContext, Context},
+    dispatch::EffectQueue,
     model::{Model, ModelAccess, ModelModify},
     prelude::ResourceModify,
     resource::{ResourceAccess, Resources},
     spawn::SpawnThread,
 };
 
-use crate::effects::{DispatchEffect, EffectSender};
+use crate::dispatch::{DispatchEffect, EffectSender};
 #[cfg(feature = "parallel")]
 use crate::spawn::{RayonPool, SpawnParallel};
 use crate::spawn::{SpawnAsync, TokioHandle};
@@ -54,16 +54,11 @@ impl<M: Model> Syzygy<M> {
     }
 
     pub fn handle_effects(&mut self) {
-        while let Some((effects, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
+        while let Some((effect, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
         {
-            // self.process_middlewares(&mut effects);
-
-            for effect in effects {
-                effect.execute(self);
-            }
-            if let Some(completion_sender) = completion_sender {
-                let _ = completion_sender.send(());
-            }
+            let mut cx = EffectContext::new(self, completion_sender);
+            effect.execute(&mut cx);
+            cx.notifer().completed();
         }
     }
 }
@@ -216,6 +211,8 @@ mod tests {
     #[cfg(not(feature = "parallel"))]
     #[test]
     fn test_dispatch() {
+        use crate::prelude::EffectStatus;
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
@@ -229,18 +226,24 @@ mod tests {
             cx.update(|m| m.counter += 1);
         });
 
-        // Test dispatching multiple updates
-        syzygy.dispatch_many(vec![
-            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
-            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
-            |cx: &mut Syzygy<TestModel>| cx.update(|m| m.counter += 1),
-        ]);
+        let completion = syzygy.dispatch(|cx| {
+            let notify = cx.notifer();
+            cx.update(|m| m.counter += 1);
+            cx.update(|m| m.counter += 1);
+            cx.update(|m| m.counter += 1);
+            notify.completed();
+        });
 
         syzygy.dispatch(|cx| {
             cx.update(|m| m.counter += 1);
         });
 
         syzygy.handle_effects();
+        let effect_status = completion.blocking_recv().unwrap();
+        match effect_status {
+            EffectStatus::Completed => {}
+            EffectStatus::Failed(e) => panic!("Effect failed: {}", e),
+        }
         assert_eq!(syzygy.model().counter, 5);
     }
 
@@ -273,28 +276,6 @@ mod tests {
     //     syzygy.handle_effects();
     //     assert_eq!(syzygy.model().counter, 5);
     // }
-
-    #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_blocking_dispatch() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .tokio_handle(rt.handle().clone())
-            .build();
-
-        syzygy.spawn_task(async |cx| {
-            cx.dispatch_awaitable(|cx| cx.update(|model| model.counter += 1))
-                .await;
-        });
-
-        for _ in 0..3 {
-            syzygy.handle_effects();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert_eq!(syzygy.model().counter, 1);
-    }
 
     // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
     // #[test]
@@ -872,36 +853,51 @@ mod tests {
     // //     assert!(!cx.is_running());
     // // }
     // #[ignore]
-    #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_dispatch_performance() {
-        use std::time::Instant;
+    // #[cfg(not(feature = "parallel"))]
+    // #[test]
+    // fn test_dispatch_performance() {
+    //     use std::time::Instant;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model.clone())
-            .tokio_handle(rt.handle().clone())
-            .build();
+    //     let rt = tokio::runtime::Runtime::new().unwrap();
+    //     let model = TestModel { counter: 0 };
+    //     let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
+    //         .model(model.clone())
+    //         .tokio_handle(rt.handle().clone())
+    //         .build();
 
-        const ITERATIONS: usize = 1_000_000;
-        const RUNS: usize = 10;
+    //     const ITERATIONS: usize = 1_000_000;
+    //     const RUNS: usize = 10;
 
-        // Test dispatch
-        let mut best = std::time::Duration::from_secs(u64::MAX);
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                syzygy.dispatch(|cx| {});
-            }
-            syzygy.handle_effects();
-            let duration = start.elapsed();
-            best = best.min(duration);
-        }
-        let ops = ITERATIONS as f64 / best.as_secs_f64();
+    //     // Test dispatch
+    //     let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
+    //     for _ in 0..RUNS {
+    //         let start = Instant::now();
+    //         for _ in 0..ITERATIONS {
+    //             syzygy.dispatch(|_| {});
+    //         }
+    //         syzygy.handle_effects();
+    //         let duration = start.elapsed();
+    //         best_dispatch = best_dispatch.min(duration);
+    //     }
+    //     let ops_dispatch = ITERATIONS as f64 / best_dispatch.as_secs_f64();
 
-        println!("Dynamic dispatch: {ITERATIONS} iterations in {best:?} ({ops:.2} ops/sec)");
-    }
+    //     // Test dispatch_awaitable
+    //     let mut best_awaitable = std::time::Duration::from_secs(u64::MAX);
+    //     for _ in 0..RUNS {
+    //         let start = Instant::now();
+    //         for _ in 0..ITERATIONS {
+    //             let rx = syzygy.dispatch_awaitable(|_| {});
+    //             // let _ = rx.blocking_recv();
+    //         }
+    //         syzygy.handle_effects();
+    //         let duration = start.elapsed();
+    //         best_awaitable = best_awaitable.min(duration);
+    //     }
+    //     let ops_awaitable = ITERATIONS as f64 / best_awaitable.as_secs_f64();
+
+    //     println!("Regular dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)");
+    //     println!("Awaitable dispatch: {ITERATIONS} iterations in {best_awaitable:?} ({ops_awaitable:.2} ops/sec)");
+    // }
     #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
     #[test]
     fn benchmark_direct_model_update() {

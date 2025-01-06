@@ -1,5 +1,5 @@
 use crate::{
-    effects::{Effect, EffectSender, DispatchEffect},
+    dispatch::{Effect, EffectSender, DispatchEffect},
     model::{Model, ModelAccess},
     resource::{ResourceAccess, Resources},
 };
