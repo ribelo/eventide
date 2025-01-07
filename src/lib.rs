@@ -7,7 +7,7 @@ pub mod spawn;
 pub mod syzygy;
 
 pub mod prelude {
-    pub use crate::context::{Context, FromContext};
+    pub use crate::context::{Context, FromContext, IntoContext, effect::EffectContext, thread::ThreadContext, r#async::AsyncContext};
     pub use crate::dispatch::{DispatchEffect, EffectSender, Effect, EffectStatus};
     pub use crate::model::{ModelAccess, ModelModify};
     pub use crate::resource::{ResourceAccess, ResourceModify, Resources};

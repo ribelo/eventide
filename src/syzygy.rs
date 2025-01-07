@@ -56,9 +56,12 @@ impl<M: Model> Syzygy<M> {
     pub fn handle_effects(&mut self) {
         while let Some((effect, completion_sender)) = self.effect_bus.effect_receiver.next_effect()
         {
-            let mut cx = EffectContext::new(self, completion_sender);
+            let mut cx = EffectContext::builder()
+                .syzygy(self)
+                .notifer(completion_sender)
+                .build();
             effect.execute(&mut cx);
-            cx.notifer().completed();
+            cx.notify().completed();
         }
     }
 }
@@ -141,7 +144,6 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 mod tests {
 
     use super::*;
-    use std::{fmt, sync::Arc};
 
     #[derive(Debug, Clone)]
     struct TestModel {
@@ -226,8 +228,8 @@ mod tests {
             cx.update(|m| m.counter += 1);
         });
 
-        let completion = syzygy.dispatch(|cx| {
-            let notify = cx.notifer();
+        let completion = syzygy.dispatch_awaitable(|cx| {
+            let notify = cx.notify();
             cx.update(|m| m.counter += 1);
             cx.update(|m| m.counter += 1);
             cx.update(|m| m.counter += 1);
@@ -242,7 +244,7 @@ mod tests {
         let effect_status = completion.blocking_recv().unwrap();
         match effect_status {
             EffectStatus::Completed => {}
-            EffectStatus::Failed(e) => panic!("Effect failed: {}", e),
+            EffectStatus::Failed(e) => panic!("Effect failed: {:?}", e)
         }
         assert_eq!(syzygy.model().counter, 5);
     }
