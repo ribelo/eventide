@@ -2,10 +2,10 @@ use crate::{dispatch::Effect, model::Model};
 
 pub mod r#async;
 pub mod thread;
-pub mod effect;
 
 pub trait Context: Sized {
     type Model: Model;
+    type Effect: Effect;
 }
 
 pub trait FromContext<T>: Context {
