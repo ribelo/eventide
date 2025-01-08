@@ -19,7 +19,7 @@ pub struct SpawnTaskError(#[from] std::io::Error);
 pub trait SpawnThread: ModelAccess + ResourceAccess + DispatchEffect {
     fn spawn<H, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(ThreadContext<Self::Model, Self::Effect>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<Self::Model, Self::Command>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
@@ -48,7 +48,7 @@ pub trait SpawnAsync: ModelAccess + ResourceAccess + DispatchEffect {
 
     fn spawn_task<H, Fut, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(AsyncContext<Self::Model, Self::Effect>) -> Fut + Send + Sync + 'static,
+        H: FnOnce(AsyncContext<Self::Model, Self::Command>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {

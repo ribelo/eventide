@@ -1,11 +1,11 @@
-use crate::{dispatch::Effect, model::Model};
+use crate::{dispatch::Command, model::Model};
 
 pub mod r#async;
 pub mod thread;
 
 pub trait Context: Sized {
     type Model: Model;
-    type Effect: Effect;
+    type Command: Command;
 }
 
 pub trait FromContext<T>: Context {

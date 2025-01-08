@@ -1,5 +1,5 @@
 use crate::{
-    dispatch::{Effect, EffectSender, DispatchEffect},
+    dispatch::{Command, EffectSender, DispatchEffect},
     model::{Model, ModelAccess},
     resource::{ResourceAccess, Resources},
 };
@@ -11,7 +11,7 @@ use crate::spawn::{RayonPool, SpawnParallel};
 use super::{Context, FromContext};
 
 #[derive(Debug)]
-pub struct ThreadContext<M: Model, E: Effect> {
+pub struct ThreadContext<M: Model, E: Command> {
     model_snapshot: M,
     resources: Resources,
     effect_sender: EffectSender<M, E>,
@@ -19,7 +19,7 @@ pub struct ThreadContext<M: Model, E: Effect> {
     rayon_pool: RayonPool,
 }
 
-impl<M: Model, E: Effect> Clone for ThreadContext<M, E> {
+impl<M: Model, E: Command> Clone for ThreadContext<M, E> {
     fn clone(&self) -> Self {
         Self {
             model_snapshot: self.model_snapshot.clone(),
@@ -31,14 +31,14 @@ impl<M: Model, E: Effect> Clone for ThreadContext<M, E> {
     }
 }
 
-impl<M: Model, E: Effect> Context for ThreadContext<M, E> {
+impl<M: Model, E: Command> Context for ThreadContext<M, E> {
     type Model = M;
-    type Effect = E;
+    type Command = E;
 }
 
-impl<T, M: Model, E: Effect> FromContext<T> for ThreadContext<M, E>
+impl<T, M: Model, E: Command> FromContext<T> for ThreadContext<M, E>
 where
-    T: Context<Model = M, Effect = E>,
+    T: Context<Model = M, Command = E>,
     T: ModelAccess + ResourceAccess + DispatchEffect + SpawnThread,
 {
     fn from_context(context: &T) -> Self {
@@ -50,28 +50,28 @@ where
     }
 }
 
-impl<M: Model, E: Effect> ModelAccess for ThreadContext<M, E> {
+impl<M: Model, E: Command> ModelAccess for ThreadContext<M, E> {
     fn model(&self) -> &M {
         &self.model_snapshot
     }
 }
 
-impl<M: Model, E: Effect> ResourceAccess for ThreadContext<M, E> {
+impl<M: Model, E: Command> ResourceAccess for ThreadContext<M, E> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M: Model, E: Effect> DispatchEffect for ThreadContext<M, E> {
+impl<M: Model, E: Command> DispatchEffect for ThreadContext<M, E> {
     fn effect_sender(&self) -> &EffectSender<M, E> {
         &self.effect_sender
     }
 }
 
-impl<M: Model, E: Effect> SpawnThread for ThreadContext<M, E> {}
+impl<M: Model, E: Command> SpawnThread for ThreadContext<M, E> {}
 
 #[cfg(feature = "parallel")]
-impl<M: Model, E: Effect> SpawnParallel<M> for ThreadContext<M, E> {
+impl<M: Model, E: Command> SpawnParallel<M> for ThreadContext<M, E> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }
