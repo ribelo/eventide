@@ -6,20 +6,20 @@ use std::ops::Deref;
 
 use tokio::sync::oneshot;
 
+use crate::context::FromContext;
 use crate::context::r#async::AsyncContext;
 use crate::context::thread::ThreadContext;
-use crate::context::FromContext;
-use crate::model::ModelAccess;
+use crate::model::ModelSnapshotCreate;
 use crate::{dispatch::DispatchEffect, resource::ResourceAccess};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Thread spawn failed")]
 pub struct SpawnTaskError(#[from] std::io::Error);
 
-pub trait SpawnThread: ModelAccess + ResourceAccess + DispatchEffect {
+pub trait SpawnThread: ModelSnapshotCreate + ResourceAccess + DispatchEffect {
     fn spawn<H, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(ThreadContext<Self::Model, Self::Command>) -> R + Send + Sync + 'static,
+        H: FnOnce(ThreadContext<Self::Model>) -> R + Send + Sync + 'static,
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
@@ -43,12 +43,12 @@ pub enum AsyncTaskError {
     ReceiveError,
 }
 
-pub trait SpawnAsync: ModelAccess + ResourceAccess + DispatchEffect {
+pub trait SpawnAsync: ModelSnapshotCreate + ResourceAccess + DispatchEffect {
     fn tokio_handle(&self) -> &TokioHandle;
 
     fn spawn_task<H, Fut, R>(&self, handler: H) -> oneshot::Receiver<R>
     where
-        H: FnOnce(AsyncContext<Self::Model, Self::Command>) -> Fut + Send + Sync + 'static,
+        H: FnOnce(AsyncContext<Self::Model>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {

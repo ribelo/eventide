@@ -1,25 +1,24 @@
 use crate::{
-    dispatch::Command,
-    model::{Model, ModelAccess},
+    model::{Model, ModelSnapshotAccess, ModelSnapshotCreate},
     resource::{ResourceAccess, Resources},
     spawn::{SpawnAsync, TokioHandle},
 };
 
 use bon::Builder;
 
-use crate::dispatch::{EffectSender, DispatchEffect};
+use crate::dispatch::{DispatchEffect, EffectSender};
 
 use super::{Context, FromContext};
 
 #[derive(Debug, Builder)]
-pub struct AsyncContext<M: Model, E: Command> {
-    pub model_snapshot: M,
+pub struct AsyncContext<M: Model> {
+    pub model_snapshot: M::Snapshot,
     pub resources: Resources,
-    pub effect_sender: EffectSender<M, E>,
+    pub effect_sender: EffectSender<M>,
     pub tokio_handle: TokioHandle,
 }
 
-impl<M: Model, E: Command> Clone for AsyncContext<M, E> {
+impl<M: Model> Clone for AsyncContext<M> {
     fn clone(&self) -> Self {
         Self {
             model_snapshot: self.model_snapshot.clone(),
@@ -30,19 +29,18 @@ impl<M: Model, E: Command> Clone for AsyncContext<M, E> {
     }
 }
 
-impl<M: Model, E: Command> Context for AsyncContext<M, E> {
+impl<M: Model> Context for AsyncContext<M> {
     type Model = M;
-    type Command = E;
 }
 
-impl<T, M: Model, E: Command> FromContext<T> for AsyncContext<M, E>
+impl<T> FromContext<T> for AsyncContext<T::Model>
 where
-    T: Context<Model = M, Command = E>,
-    T: ModelAccess + ResourceAccess + DispatchEffect + SpawnAsync,
+    T: Context,
+    T: ModelSnapshotCreate + ResourceAccess + DispatchEffect + SpawnAsync,
 {
     fn from_context(context: &T) -> Self {
         Self {
-            model_snapshot: context.model().clone(),
+            model_snapshot: context.create_snapshot(),
             resources: context.resources().clone(),
             effect_sender: context.effect_sender().clone(),
             tokio_handle: context.tokio_handle().clone(),
@@ -50,25 +48,31 @@ where
     }
 }
 
-impl<M: Model, E: Command> ModelAccess for AsyncContext<M, E> {
-    fn model(&self) -> &M {
+impl<M: Model> ModelSnapshotAccess for AsyncContext<M> {
+    fn snapshot(&self) -> &<<Self as Context>::Model as Model>::Snapshot {
         &self.model_snapshot
     }
 }
 
-impl<M: Model, E: Command> ResourceAccess for AsyncContext<M, E> {
+impl<M: Model> ModelSnapshotCreate for AsyncContext<M> {
+    fn create_snapshot(&self) -> <<Self as Context>::Model as Model>::Snapshot {
+        self.model_snapshot.clone()
+    }
+}
+
+impl<M: Model> ResourceAccess for AsyncContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M: Model, E: Command> DispatchEffect for AsyncContext<M, E> {
-    fn effect_sender(&self) -> &EffectSender<M, E> {
+impl<M: Model> DispatchEffect for AsyncContext<M> {
+    fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_sender
     }
 }
 
-impl<M: Model, E: Command> SpawnAsync for AsyncContext<M, E> {
+impl<M: Model> SpawnAsync for AsyncContext<M> {
     fn tokio_handle(&self) -> &TokioHandle {
         &self.tokio_handle
     }

@@ -10,7 +10,7 @@ pub mod prelude {
     pub use crate::context::{
         r#async::AsyncContext, thread::ThreadContext, Context, FromContext, IntoContext,
     };
-    pub use crate::dispatch::{DispatchEffect, Command, Effects, EffectSender};
+    pub use crate::dispatch::{DispatchEffect, Effects, EffectSender};
     pub use crate::model::{ModelAccess, ModelModify};
     pub use crate::resource::{ResourceAccess, ResourceModify, Resources};
     pub use crate::spawn::SpawnThread;

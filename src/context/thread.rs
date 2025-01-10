@@ -1,6 +1,6 @@
 use crate::{
-    dispatch::{Command, EffectSender, DispatchEffect},
-    model::{Model, ModelAccess},
+    dispatch::{DispatchEffect, EffectSender},
+    model::{Model, ModelSnapshotAccess, ModelSnapshotCreate},
     resource::{ResourceAccess, Resources},
 };
 
@@ -11,15 +11,15 @@ use crate::spawn::{RayonPool, SpawnParallel};
 use super::{Context, FromContext};
 
 #[derive(Debug)]
-pub struct ThreadContext<M: Model, E: Command> {
-    model_snapshot: M,
+pub struct ThreadContext<M: Model> {
+    model_snapshot: M::Snapshot,
     resources: Resources,
-    effect_sender: EffectSender<M, E>,
+    effect_sender: EffectSender<M>,
     #[cfg(feature = "parallel")]
     rayon_pool: RayonPool,
 }
 
-impl<M: Model, E: Command> Clone for ThreadContext<M, E> {
+impl<M: Model> Clone for ThreadContext<M> {
     fn clone(&self) -> Self {
         Self {
             model_snapshot: self.model_snapshot.clone(),
@@ -31,47 +31,52 @@ impl<M: Model, E: Command> Clone for ThreadContext<M, E> {
     }
 }
 
-impl<M: Model, E: Command> Context for ThreadContext<M, E> {
+impl<M: Model> Context for ThreadContext<M> {
     type Model = M;
-    type Command = E;
 }
 
-impl<T, M: Model, E: Command> FromContext<T> for ThreadContext<M, E>
+impl<T, M: Model> FromContext<T> for ThreadContext<M>
 where
-    T: Context<Model = M, Command = E>,
-    T: ModelAccess + ResourceAccess + DispatchEffect + SpawnThread,
+    T: Context<Model = M>,
+    T: ModelSnapshotCreate + ResourceAccess + DispatchEffect + SpawnThread,
 {
     fn from_context(context: &T) -> Self {
         Self {
-            model_snapshot: context.model().clone(),
+            model_snapshot: context.create_snapshot(),
             resources: context.resources().clone(),
             effect_sender: context.effect_sender().clone(),
         }
     }
 }
 
-impl<M: Model, E: Command> ModelAccess for ThreadContext<M, E> {
-    fn model(&self) -> &M {
-        &self.model_snapshot
+impl<M: Model> ModelSnapshotAccess for ThreadContext<M> {
+    fn snapshot(&self) -> &<<Self as Context>::Model as Model>::Snapshot {
+        todo!()
     }
 }
 
-impl<M: Model, E: Command> ResourceAccess for ThreadContext<M, E> {
+impl<M: Model> ModelSnapshotCreate for ThreadContext<M> {
+    fn create_snapshot(&self) -> <<Self as Context>::Model as Model>::Snapshot {
+        self.model_snapshot.clone()
+    }
+}
+
+impl<M: Model> ResourceAccess for ThreadContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
     }
 }
 
-impl<M: Model, E: Command> DispatchEffect for ThreadContext<M, E> {
-    fn effect_sender(&self) -> &EffectSender<M, E> {
+impl<M: Model> DispatchEffect for ThreadContext<M> {
+    fn effect_sender(&self) -> &EffectSender<M> {
         &self.effect_sender
     }
 }
 
-impl<M: Model, E: Command> SpawnThread for ThreadContext<M, E> {}
+impl<M: Model> SpawnThread for ThreadContext<M> {}
 
 #[cfg(feature = "parallel")]
-impl<M: Model, E: Command> SpawnParallel<M> for ThreadContext<M, E> {
+impl<M: Model> SpawnParallel<M> for ThreadContext<M> {
     fn rayon_pool(&self) -> &RayonPool {
         &self.rayon_pool
     }

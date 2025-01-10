@@ -1,11 +1,10 @@
-use crate::{dispatch::Command, model::Model};
+use crate::model::Model;
 
 pub mod r#async;
 pub mod thread;
 
 pub trait Context: Sized {
     type Model: Model;
-    type Command: Command;
 }
 
 pub trait FromContext<T>: Context {
@@ -18,7 +17,7 @@ pub trait IntoContext<T> {
 
 impl<C, T> IntoContext<C> for T
 where
-    C: FromContext<T>
+    C: FromContext<T>,
 {
     fn into_context(self) -> C {
         C::from_context(&self)

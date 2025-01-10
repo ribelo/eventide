@@ -2,8 +2,10 @@ use crate::context::Context;
 
 mod unsync;
 
-pub trait Model: Clone + Send + Sync + 'static {}
-impl<T> Model for T where T: Clone + Send + Sync + 'static {}
+pub trait Model: Send + Sync + 'static {
+    type Snapshot: Clone + Send + Sync + 'static;
+    fn into_snapshot(&self) -> Self::Snapshot;
+}
 
 pub trait ModelAccess: Context {
     #[must_use]
@@ -28,6 +30,19 @@ pub trait ModelModify: ModelAccess {
     }
 }
 
-pub trait ModelSnapshot<M: Model> {
-    fn snapshot(&self) -> M;
+pub trait ModelSnapshotAccess: Context {
+    #[must_use]
+    fn snapshot(&self) -> &<<Self as Context>::Model as Model>::Snapshot;
+    #[must_use]
+    fn query_snapshot<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&<<Self as Context>::Model as Model>::Snapshot) -> R,
+    {
+        f(self.snapshot())
+    }
+}
+
+pub trait ModelSnapshotCreate: Context {
+    #[must_use]
+    fn create_snapshot(&self) -> <<Self as Context>::Model as Model>::Snapshot;
 }
