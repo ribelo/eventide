@@ -2,7 +2,7 @@ use bon::Builder;
 
 use crate::{
     context::{Context, FromContext},
-    dispatch::{Effect, EffectQueue},
+    dispatch::{EffectQueue, Message},
     model::{Model, ModelAccess, ModelModify, ModelSnapshotCreate},
     prelude::{AsyncContext, ThreadContext},
     resource::{ResourceAccess, ResourceModify, Resources},
@@ -58,28 +58,35 @@ impl<M: Model> Syzygy<M> {
             let sender = self.effect_bus.effect_sender.clone();
 
             // Process all Commands in sequence until encountering a Task/AsyncTask
-            while let Some(effect) = batch.pop_front() {
-                match effect {
-                    Effect::Cmd(cmd) => {
-                        let new_effects = (cmd)(self);
-                        // Add new effects to end of current batch
-                        batch.extend(new_effects);
+            while let Some(message) = batch.pop_front() {
+                match message {
+                    Message::Cmd(cmd) => {
+                        let new_messages = cmd.run(self);
+                        if !new_messages.is_empty() {
+                            // Add new messages to end of queue
+                            self.send(new_messages);
+                        }
                     }
-                    Effect::Task(task) => {
+                    Message::Task(task) => {
                         let ctx = ThreadContext::from_context(self);
                         std::thread::spawn(move || {
-                            let new_effects = task(ctx);
-                            batch.extend(new_effects);
-                            sender.dispatch(batch);
+                            let new_messages = task.run(ctx);
+                            if !new_messages.is_empty() {
+                                // Add new effects to end of current batch
+                                batch.extend(new_messages);
+                                sender.dispatch(batch);
+                            }
                         });
                         break; // Break loop, remainder will process after task completion
                     }
-                    Effect::AsyncTask(async_task) => {
+                    Message::AsyncTask(async_task) => {
                         let ctx = AsyncContext::from_context(self);
                         self.tokio_handle.spawn(async move {
-                            let new_effects = async_task(ctx).await;
-                            batch.extend(new_effects);
-                            sender.dispatch(batch);
+                            let new_messages = async_task.run(ctx).await;
+                            if !new_messages.is_empty() {
+                                batch.extend(new_messages);
+                                sender.dispatch(batch);
+                            }
                         });
                         break; // Break loop, remainder will process after async task completion
                     }
@@ -173,8 +180,10 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 #[cfg(test)]
 mod tests {
 
+    use async_trait::async_trait;
+
     use super::*;
-    use crate::dispatch::Effects;
+    use crate::dispatch::{AsyncTask, Command, Messages, Task};
 
     #[derive(Debug, Clone)]
     struct TestModel {
@@ -193,10 +202,33 @@ mod tests {
         name: String,
     }
 
-    // Create an increment counter effect
-    #[derive(Debug, Clone)]
-    enum TestEffect {
-        Increment,
+    #[derive(Debug)]
+    pub struct IncrementCmd;
+
+    impl Command<TestModel> for IncrementCmd {
+        fn run(self: Box<Self>, syzygy: &mut Syzygy<TestModel>) -> Messages<TestModel> {
+            syzygy.model_mut().counter += 1;
+            Messages::none()
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct IncrementTask;
+
+    impl Task<TestModel> for IncrementTask {
+        fn run(self: Box<Self>, ctx: ThreadContext<TestModel>) -> Messages<TestModel> {
+            Messages::none().and_then_cmd(IncrementCmd)
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct IncrementAsyncTask;
+
+    #[async_trait]
+    impl AsyncTask<TestModel> for IncrementAsyncTask {
+        async fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Messages<TestModel> {
+            Messages::none().and_then_cmd(IncrementCmd)
+        }
     }
 
     #[cfg(not(feature = "parallel"))]
@@ -256,7 +288,7 @@ mod tests {
 
     #[cfg(not(feature = "parallel"))]
     #[test]
-    fn test_dispatch() {
+    fn test_async_dispatch() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
@@ -266,10 +298,7 @@ mod tests {
 
         // Dispatch the effect multiple times
         for _ in 0..5 {
-            syzygy.dispatch(|cx| {
-                cx.model_mut().counter += 1;
-                Effects::none()
-            });
+            syzygy.dispatch(IncrementCmd);
         }
 
         syzygy.handle_effects();
@@ -278,7 +307,7 @@ mod tests {
     }
     #[cfg(not(feature = "parallel"))]
     #[test]
-    fn test_sync_task() {
+    fn test_sync_dispatch() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
@@ -286,13 +315,24 @@ mod tests {
             .tokio_handle(rt.handle().clone())
             .build();
 
-        syzygy.task(|_| {
-            println!("hello from task");
-            Effects::<TestModel>::none().and_then_cmd(|ctx| {
-                ctx.model_mut().counter += 1;
-                Effects::none()
-            })
-        });
+        let rx = syzygy.dispatch_sync(IncrementCmd);
+
+        syzygy.handle_effects();
+        rx.blocking_recv().unwrap();
+
+        assert_eq!(syzygy.model().counter, 1);
+    }
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn test_thread_task() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let model = TestModel { counter: 0 };
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
+            .model(model)
+            .tokio_handle(rt.handle().clone())
+            .build();
+
+        syzygy.task(IncrementTask);
 
         syzygy.handle_effects();
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -310,13 +350,7 @@ mod tests {
             .tokio_handle(rt.handle().clone())
             .build();
 
-        syzygy.async_task(async |_| {
-            println!("hello from async task");
-            Effects::<TestModel>::none().and_then_cmd(|ctx| {
-                ctx.model_mut().counter += 1;
-                Effects::none()
-            })
-        });
+        syzygy.async_task(IncrementAsyncTask);
 
         syzygy.handle_effects();
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -324,215 +358,6 @@ mod tests {
 
         assert_eq!(syzygy.model().counter, 1);
     }
-
-    // #[cfg(not(feature = "parallel"))]
-    // #[test]
-    // fn test_dynamic_dispatch() {
-    //     let rt = tokio::runtime::Runtime::new().unwrap();
-    //     let model = TestModel { counter: 0 };
-    //     let mut syzygy: Syzygy<TestModel, StaticEffect> = Syzygy::builder()
-    //         .model(model)
-    //         .tokio_handle(rt.handle().clone())
-    //         .build();
-
-    //     // Test dispatching updates
-    //     syzygy.send(|cx: &mut Syzygy<TestModel, EffectFn>| {
-    //         cx.update(|m| m.counter += 1);
-    //     });
-
-    //     // Test dispatching multiple updates
-    //     syzygy.send_multiple((0..3).map(|_| {
-    //         |cx: &mut Syzygy<TestModel, EffectFn>| {
-    //             cx.update(|m| m.counter += 1);
-    //         }
-    //     }));
-
-    //     syzygy.send(EffectFn(Box::new(|cx| {
-    //         cx.update(|m| m.counter += 1);
-    //     })));
-
-    //     syzygy.handle_effects();
-    //     assert_eq!(syzygy.model().counter, 5);
-    // }
-
-    // #[cfg(all(feature = "effects", not(feature = "async"), not(feature = "parallel")))]
-    // #[test]
-    // fn test_thread_spawn() {
-    //     use std::sync::atomic::{AtomicI32, Ordering};
-
-    //     let model = TestModel { counter: 0 };
-    //     let mut syzygy = Syzygy::builder().model(model).build();
-    //     let counter = Arc::new(AtomicI32::new(0));
-
-    //     // Test spawning a thread that increments counter
-    //     let counter_clone = Arc::clone(&counter);
-    //     let rx = syzygy.spawn(move |_| {
-    //         counter_clone.fetch_add(1, Ordering::SeqCst);
-    //         42 // Return value
-    //     });
-
-    //     syzygy.handle_effects();
-    //     // Wait for thread to complete
-    //     let result = rx.recv().unwrap();
-
-    //     assert_eq!(result, 42);
-    //     assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-    //     // Test spawning multiple threads
-    //     let threads: Vec<_> = (0..5)
-    //         .map(|_| {
-    //             let counter_clone = Arc::clone(&counter);
-    //             syzygy.spawn(move |_| {
-    //                 counter_clone.fetch_add(1, Ordering::SeqCst);
-    //             })
-    //         })
-    //         .collect();
-
-    //     syzygy.handle_effects();
-    //     // Wait for all threads
-    //     for rx in threads {
-    //         rx.recv().unwrap();
-    //     }
-
-    //     assert_eq!(counter.load(Ordering::SeqCst), 6);
-    // }
-
-    // #[cfg(all(feature = "effects", feature = "async", not(feature = "parallel")))]
-    // #[test]
-    // fn test_tokio_spawn() {
-    //     use std::sync::atomic::{AtomicI32, Ordering};
-
-    //     let model = TestModel { counter: 0 };
-    //     let resource = TestResource {
-    //         name: "test_str".to_string(),
-    //     };
-    //     let rt = tokio::runtime::Runtime::new().unwrap();
-    //     let syzygy = Syzygy::builder()
-    //         .model(model)
-    //         .tokio_handle(rt.handle().clone())
-    //         .build();
-
-    //     let counter = Arc::new(AtomicI32::new(0));
-
-    //     // fn sync_handler<C>(cx: C)
-    //     // where
-    //     //     C: SpawnThread,
-    //     // {
-    //     //     println!("async_handler");
-    //     //     cx.resource::<TestResource>(); // działa
-    //     //     cx.spawn(|cx| {
-    //     //         //error
-    //     //         cx.resource::<TestResource>();
-    //     //     });
-    //     //     // cx.spawn_task(|cx| async {
-    //     //     //     cx.resource::<TestResource>();
-    //     //     // })
-    //     // }
-    //     // działa
-    //     syzygy.spawn(|cx| {
-    //         cx.resource::<TestResource>();
-    //     });
-    //     // nie działa
-    //     syzygy.spawn(|cx| {
-    //         cx.resource::<TestResource>();
-    //     });
-    //     // działa
-    //     syzygy.spawn(|cx| println!("hello from thread"));
-
-    //     async fn async_handler<C: 'static, M: 'static>(cx: C)
-    //     where
-    //         C: SpawnAsync<M>,
-    //     {
-    //         println!("async_handler");
-    //         cx.resource::<TestResource>();
-    //         // cx.spawn(|cx| {
-    //         //     cx.resource::<TestResource>();
-    //         // });
-    //         // cx.spawn_task(|cx| async {
-    //         //     cx.resource::<TestResource>();
-    //         // })
-    //     }
-    //     syzygy.spawn_task(async_handler);
-
-    //     // Test spawning a task that increments counter
-    //     let counter_clone = Arc::clone(&counter);
-    //     let rx = syzygy.spawn_task(move |cx| async move {
-    //         counter_clone.fetch_add(1, Ordering::SeqCst);
-    //         42 // Return value
-    //     });
-
-    //     syzygy.handle_waiting();
-    //     // Wait for task to complete
-    //     let result = rx.blocking_recv().unwrap();
-
-    //     assert_eq!(result, 42);
-    //     assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-    //     // Test spawning multiple tasks
-    //     let tasks: Vec<_> = (0..5)
-    //         .map(|_| {
-    //             let counter_clone = Arc::clone(&counter);
-    //             syzygy.spawn_task(move |cx| async move {
-    //                 counter_clone.fetch_add(1, Ordering::SeqCst);
-    //             })
-    //         })
-    //         .collect();
-
-    //     syzygy.handle_waiting();
-    //     // Wait for all tasks
-    //     for rx in tasks {
-    //         rx.blocking_recv().unwrap();
-    //     }
-
-    //     assert_eq!(counter.load(Ordering::SeqCst), 6);
-    // }
-
-    // #[cfg(all(feature = "parallel", not(feature = "async")))]
-    // #[test]
-    // fn test_parallel_spawn() {
-    //     use std::sync::atomic::{AtomicI32, Ordering};
-
-    //     let model = TestModel { counter: 0 };
-    //     let syzygy = Syzygy::builder()
-    //         .model(model)
-    //         .rayon_pool(rayon::ThreadPoolBuilder::new().build().unwrap())
-    //         .build();
-
-    //     let counter = Arc::new(AtomicI32::new(0));
-
-    //     // Test spawning a parallel task that increments counter
-    //     let counter_clone = Arc::clone(&counter);
-
-    //     let rx = syzygy.spawn_parallel(move |cx| {
-    //         counter_clone.fetch_add(1, Ordering::SeqCst);
-    //         42 // Return value
-    //     });
-
-    //     syzygy.handle_waiting();
-    //     // Wait for task to complete
-    //     let result = rx.recv().unwrap();
-
-    //     assert_eq!(result, 42);
-    //     assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-    //     // Test spawning multiple parallel tasks
-    //     let tasks: Vec<_> = (0..5)
-    //         .map(|_| {
-    //             let counter_clone = Arc::clone(&counter);
-    //             syzygy.spawn_parallel(move |_cx| {
-    //                 counter_clone.fetch_add(1, Ordering::SeqCst);
-    //             })
-    //         })
-    //         .collect();
-
-    //     syzygy.handle_waiting();
-    //     // Wait for all tasks
-    //     for rx in tasks {
-    //         rx.recv().unwrap();
-    //     }
-
-    //     assert_eq!(counter.load(Ordering::SeqCst), 6);
-    // }
 
     // // #[test]
     // // #[cfg(not(feature = "async"))]
@@ -936,6 +761,8 @@ mod tests {
     fn test_dispatch_performance() {
         use std::time::Instant;
 
+        use crate::dispatch::Command;
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder()
@@ -946,11 +773,19 @@ mod tests {
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
 
+        #[derive(Debug)]
+        pub struct TestCommand;
+        impl Command<TestModel> for TestCommand {
+            fn run(self: Box<Self>, syzygy: &mut Syzygy<TestModel>) -> Messages<TestModel> {
+                Messages::none()
+            }
+        }
+
         let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                syzygy.dispatch(|_| Effects::<TestModel>::none());
+                syzygy.dispatch(TestCommand);
             }
             syzygy.handle_effects();
             let duration = start.elapsed();

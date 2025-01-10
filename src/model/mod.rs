@@ -1,8 +1,10 @@
+use core::fmt;
+
 use crate::context::Context;
 
 mod unsync;
 
-pub trait Model: Send + Sync + 'static {
+pub trait Model: fmt::Debug + Send + Sync + 'static {
     type Snapshot: Clone + Send + Sync + 'static;
     fn into_snapshot(&self) -> Self::Snapshot;
 }

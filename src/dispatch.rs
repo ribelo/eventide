@@ -1,48 +1,64 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use bon::Builder;
 use derive_more::derive::{Deref, DerefMut, From, IntoIterator};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::prelude::ThreadContext;
 use crate::{context::Context, model::Model, prelude::AsyncContext, syzygy::Syzygy};
 
-pub type Cmd<M> = Box<dyn FnOnce(&mut Syzygy<M>) -> Effects<M> + Send + Sync + 'static>;
-
-pub type Task<M> = Box<dyn FnOnce(ThreadContext<M>) -> Effects<M> + Send + Sync + 'static>;
-
-pub type AsyncTask<M> = Box<
-    dyn FnOnce(AsyncContext<M>) -> Pin<Box<dyn Future<Output = Effects<M>> + Send + 'static>>
-        + Send
-        + Sync
-        + 'static,
->;
-
-#[derive(From)]
-pub enum Effect<M: Model> {
-    Cmd(Cmd<M>),
-    Task(Task<M>),
-    AsyncTask(AsyncTask<M>),
+pub trait Command<M: Model>: fmt::Debug + Send + Sync + 'static {
+    fn run(self: Box<Self>, syzygy: &mut Syzygy<M>) -> Messages<M>;
 }
 
-impl<M: Model> std::fmt::Debug for Effect<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cmd(_) => f.debug_tuple("Command").field(&"<cmd>").finish(),
-            Self::Task(_) => f.debug_tuple("Task").field(&"<task>").finish(),
-            Self::AsyncTask(_) => f.debug_tuple("AsyncTask").field(&"<async_task>").finish(),
+pub trait Task<M: Model>: fmt::Debug + Send + Sync + 'static {
+    fn run(self: Box<Self>, ctx: ThreadContext<M>) -> Messages<M>;
+}
+
+#[async_trait]
+pub trait AsyncTask<M: Model>: fmt::Debug + Send + Sync + 'static {
+    async fn run(self: Box<Self>, ctx: AsyncContext<M>) -> Messages<M>;
+}
+
+#[derive(Debug)]
+struct SyncCommand<M: Model + std::fmt::Debug> {
+    tx: oneshot::Sender<()>,
+    phantom: PhantomData<M>,
+}
+
+impl<M: Model> SyncCommand<M> {
+    fn new(tx: oneshot::Sender<()>) -> Self {
+        Self {
+            tx,
+            phantom: PhantomData,
         }
     }
 }
 
-#[derive(Debug, Builder, Deref, DerefMut, IntoIterator)]
-pub struct Effects<M: Model> {
-    pub(crate) items: VecDeque<Effect<M>>,
+impl<M: Model + std::fmt::Debug> Command<M> for SyncCommand<M> {
+    fn run(self: Box<Self>, _syzygy: &mut Syzygy<M>) -> Messages<M> {
+        let _ = self.tx.send(());
+        Messages::none()
+    }
 }
 
-impl<M: Model> Default for Effects<M> {
+#[derive(Debug, From)]
+pub enum Message<M: Model> {
+    Cmd(Box<dyn Command<M>>),
+    Task(Box<dyn Task<M>>),
+    AsyncTask(Box<dyn AsyncTask<M>>),
+}
+
+#[derive(Debug, Builder, Deref, DerefMut, IntoIterator)]
+pub struct Messages<M: Model> {
+    pub(crate) items: VecDeque<Message<M>>,
+}
+
+impl<M: Model> Default for Messages<M> {
     fn default() -> Self {
         Self {
             items: VecDeque::default(),
@@ -50,76 +66,44 @@ impl<M: Model> Default for Effects<M> {
     }
 }
 
-impl<M: Model> Effects<M> {
+impl<M: Model> Messages<M> {
     #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn none() -> Self {
         Self::default()
     }
     #[must_use]
-    pub fn and_then_cmd<F>(mut self, cmd: F) -> Self
-    where
-        F: FnOnce(&mut Syzygy<M>) -> Effects<M> + Send + Sync + 'static,
-    {
-        let effect = Effect::Cmd(Box::new(cmd));
+    pub fn and_then_cmd(mut self, cmd: impl Command<M>) -> Self {
+        let effect = Message::Cmd(Box::new(cmd));
         self.items.push_back(effect);
         self
     }
     #[must_use]
-    pub fn and_then_task<F>(mut self, task: F) -> Self
-    where
-        F: FnOnce(ThreadContext<M>) -> Effects<M> + Send + Sync + 'static,
-    {
-        let effect = Effect::Task(Box::new(task));
+    pub fn and_then_task(mut self, task: impl Task<M>) -> Self {
+        let effect = Message::Task(Box::new(task));
         self.items.push_back(effect);
         self
     }
     #[must_use]
-    pub fn and_then_async_task<F, Fut>(mut self, async_task: F) -> Self
-    where
-        F: FnOnce(AsyncContext<M>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Effects<M>> + Send + 'static,
-    {
-        let async_task = Box::new(move |ctx| {
-            Box::pin(async_task(ctx)) as Pin<Box<dyn Future<Output = Effects<M>> + Send>>
-        });
-        let effect = Effect::AsyncTask(Box::new(async_task));
+    pub fn and_then_async_task(mut self, async_task: impl AsyncTask<M>) -> Self {
+        let effect = Message::AsyncTask(Box::new(async_task));
         self.items.push_back(effect);
         self
     }
 }
 
-impl<M: Model> From<Vec<Effect<M>>> for Effects<M> {
-    fn from(items: Vec<Effect<M>>) -> Self {
-        Effects { items: VecDeque::from(items) }
-    }
-}
-
-impl<M: Model> From<Effect<M>> for Effects<M> {
-    fn from(effect: Effect<M>) -> Self {
-        Effects { items: VecDeque::from([effect]) }
-    }
-}
-
-impl<M: Model> From<Cmd<M>> for Effects<M> {
-    fn from(cmd: Cmd<M>) -> Self {
-        Effects { items: VecDeque::from([Effect::from(cmd)]) }
-    }
-}
-
-impl<M: Model> From<Task<M>> for Effects<M> {
-    fn from(task: Task<M>) -> Self {
-        Effects { items: VecDeque::from([Effect::from(task)]) }
-    }
-}
-
-impl<M: Model> From<AsyncTask<M>> for Effects<M> {
-    fn from(async_task: AsyncTask<M>) -> Self {
-        Effects { items: VecDeque::from([Effect::from(async_task)]) }
+impl<M: Model> From<Message<M>> for Messages<M> {
+    fn from(effect: Message<M>) -> Self {
+        Messages {
+            items: VecDeque::from([effect]),
+        }
     }
 }
 
 pub struct EffectSender<M: Model> {
-    pub(crate) tx: mpsc::UnboundedSender<Effects<M>>,
+    pub(crate) tx: mpsc::UnboundedSender<Messages<M>>,
     pub(crate) effect_hook: Option<Box<dyn Fn() + Send + Sync>>,
     phantom: PhantomData<M>,
 }
@@ -147,7 +131,7 @@ impl<M: Model> Clone for EffectSender<M> {
 }
 
 pub struct EffectReceiver<M: Model> {
-    pub(crate) rx: mpsc::UnboundedReceiver<Effects<M>>,
+    pub(crate) rx: mpsc::UnboundedReceiver<Messages<M>>,
     phantom: PhantomData<M>,
 }
 
@@ -189,7 +173,7 @@ impl<M: Model> Default for EffectQueue<M> {
 
 impl<M: Model> EffectSender<M> {
     #[inline]
-    pub fn dispatch(&self, msgs: Effects<M>) {
+    pub fn dispatch(&self, msgs: Messages<M>) {
         self.tx
             .send(msgs)
             .expect("Effect bus channel unexpectedly closed");
@@ -202,7 +186,7 @@ impl<M: Model> EffectSender<M> {
 impl<M: Model> EffectReceiver<M> {
     #[must_use]
     #[inline]
-    pub(crate) fn next_batch(&mut self) -> Option<Effects<M>> {
+    pub(crate) fn next_batch(&mut self) -> Option<Messages<M>> {
         match self.rx.try_recv() {
             Ok(effect) => Some(effect),
             Err(_) => None,
@@ -213,29 +197,27 @@ impl<M: Model> EffectReceiver<M> {
 pub trait DispatchEffect: Context {
     fn effect_sender(&self) -> &EffectSender<Self::Model>;
     #[inline]
-    fn dispatch<F>(&self, cmd: F)
-    where
-        F: FnOnce(&mut Syzygy<Self::Model>) -> Effects<Self::Model> + Send + Sync + 'static,
-    {
-        let effect = Effect::Cmd(Box::new(cmd));
-        self.effect_sender().dispatch(Effects::from(effect));
+    fn send(&self, message: impl Into<Messages<Self::Model>>) {
+        self.effect_sender().dispatch(message.into());
     }
-    fn task<F>(&self, task: F)
-    where
-        F: FnOnce(ThreadContext<Self::Model>) -> Effects<Self::Model> + Send + Sync + 'static,
-    {
-        let effect = Effect::Task(Box::new(task));
-        self.effect_sender().dispatch(Effects::from(effect));
+    fn dispatch(&self, cmd: impl Command<Self::Model>) {
+        let message = Message::Cmd(Box::new(cmd));
+        self.send(message);
     }
-    fn async_task<F, Fut>(&self, task: F)
-    where
-        F: FnOnce(AsyncContext<Self::Model>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Effects<Self::Model>> + Send + 'static,
-    {
-        let task = Box::new(move |ctx| {
-            Box::pin(task(ctx)) as Pin<Box<dyn Future<Output = Effects<Self::Model>> + Send>>
-        });
-        let effect = Effect::AsyncTask(task);
-        self.effect_sender().dispatch(Effects::from(effect));
+    fn dispatch_sync(&self, cmd: impl Command<Self::Model>) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        let messages = Messages::new()
+            .and_then_cmd(cmd)
+            .and_then_cmd(SyncCommand::new(tx));
+        self.send(messages);
+        rx
+    }
+    fn task(&self, task: impl Task<Self::Model>) {
+        let message = Message::Task(Box::new(task));
+        self.send(message);
+    }
+    fn async_task(&self, async_task: impl AsyncTask<Self::Model>) {
+        let message = Message::AsyncTask(Box::new(async_task));
+        self.send(message);
     }
 }
