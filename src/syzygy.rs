@@ -2,19 +2,17 @@ use bon::Builder;
 
 use crate::{
     context::Context,
-    dispatch::EffectQueue,
+    dispatch::{DispatchEffect, EffectsQueue},
     model::{Model, ModelAccess, ModelModify, ModelSnapshotCreate},
     resource::{ResourceAccess, ResourceModify, Resources},
 };
-
-use crate::dispatch::{DispatchEffect, EffectSender};
 
 #[derive(Debug, Builder)]
 pub struct Syzygy<M: Model> {
     #[builder(field)]
     pub resources: Resources,
     #[builder(field)]
-    pub effect_bus: EffectQueue<M>,
+    pub effects_queue: EffectsQueue<M>,
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
@@ -33,13 +31,12 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 
 impl<M: Model> Syzygy<M> {
     pub fn handle_effects(&mut self) {
-        while let Some(batch) = self.effect_bus.effect_receiver.next_batch() {
-            let sender = self.effect_bus.effect_sender.clone();
+        while let Some(batch) = self.effects_queue.next_batch() {
             for effect in batch {
                 let new_messages = (effect)(self);
                 if !new_messages.is_empty() {
                     // Add new messages to end of queue
-                    sender.dispatch(new_messages);
+                    self.effects_queue.push(new_messages);
                 }
             }
         }
@@ -82,8 +79,8 @@ impl<M: Model> ResourceModify for Syzygy<M> {}
 
 impl<M: Model> DispatchEffect for Syzygy<M> {
     #[inline]
-    fn effect_sender(&self) -> &EffectSender<M> {
-        &self.effect_bus.effect_sender
+    fn effects_queue(&self) -> &EffectsQueue<M> {
+        &self.effects_queue
     }
 }
 
@@ -162,9 +159,7 @@ mod tests {
     #[tokio::test]
     async fn test_model() {
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder()
-            .model(model)
-            .build();
+        let mut syzygy = Syzygy::builder().model(model).build();
 
         // Test initial state
         let counter = syzygy.model().counter;
@@ -213,9 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_dispatch() {
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .build();
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
         // Dispatch the effect multiple times
         for _ in 0..5 {
@@ -230,9 +223,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_dispatch() {
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .build();
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
         let rx = syzygy.dispatch_sync(increment);
 
@@ -247,9 +238,7 @@ mod tests {
         use crate::dispatch::ThreadTask;
 
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .build();
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
         let effects = Effects::new()
             .spawn(
@@ -691,9 +680,7 @@ mod tests {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder()
-            .model(model.clone())
-            .build();
+        let mut syzygy = Syzygy::builder().model(model.clone()).build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
@@ -714,15 +701,46 @@ mod tests {
             "Effect dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)"
         );
     }
+    #[cfg(not(feature = "parallel"))]
+    #[tokio::test]
+    async fn test_task_performance() {
+        use std::time::Instant;
+        use crate::dispatch::AsyncTask;
+
+        let model = TestModel { counter: 0 };
+        let mut syzygy = Syzygy::builder().model(model.clone()).build();
+
+        const ITERATIONS: usize = 1_000_000;
+        const RUNS: usize = 10;
+
+        let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                let effects = Effects::new()
+                    .task(
+                        async |_| (),
+                    )
+                    .perform(|_| Effects::from(increment));
+                syzygy.dispatch(effects);
+            }
+            syzygy.handle_effects();
+            let duration = start.elapsed();
+            best_dispatch = best_dispatch.min(duration);
+        }
+        let ops_dispatch = ITERATIONS as f64 / best_dispatch.as_secs_f64();
+
+        println!(
+            "Task dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)"
+        );
+    }
     #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
     #[tokio::test]
     async fn benchmark_direct_model_update() {
         use std::time::Instant;
 
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .build();
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;

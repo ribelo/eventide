@@ -1,14 +1,13 @@
-use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use bon::Builder;
+use crossbeam_queue::SegQueue;
 use derive_more::derive::{Deref, DerefMut, IntoIterator};
 use tokio::sync::oneshot;
 
-use crate::context::FromContext;
-use crate::{context::Context, model::Model, prelude::AsyncContext, syzygy::Syzygy};
+use crate::context::{Context, FromContext};
+use crate::{model::Model, prelude::AsyncContext, syzygy::Syzygy};
 
 pub trait EffectFn<M: Model>: FnOnce(&mut Syzygy<M>) -> Effects<M> + Send + Sync + 'static {}
 
@@ -86,12 +85,12 @@ impl<M: Model, O: Send + Sync + 'static> ThreadTask<M, O> {
     pub fn perform(mut self, f: impl PerformFn<M, O>) -> impl EffectFn<M> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let sender = async_ctx.sender.clone();
+            let queue = async_ctx.effects_queue.clone();
             let task = self.inner.take().unwrap();
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                sender.dispatch(effects);
+                queue.push(effects);
             });
             Effects::none()
         }
@@ -134,12 +133,12 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
     pub fn perform(mut self, f: impl PerformFn<M, O>) -> impl EffectFn<M> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let sender = async_ctx.sender.clone();
+            let queue = async_ctx.effects_queue.clone();
             let task = self.inner.take().unwrap();
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                sender.dispatch(effects);
+                queue.push(effects);
             });
             Effects::none()
         }
@@ -231,12 +230,12 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let sender = async_ctx.sender.clone();
+            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                sender.dispatch(effects);
+                queue.push(effects);
             });
             Effects::none()
         }));
@@ -248,11 +247,11 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let sender = async_ctx.sender.clone();
+            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
             tokio::spawn(async move {
                 let _ = task.call(async_ctx).await;
-                sender.dispatch(Effects::none());
+                queue.push(Effects::none());
             });
             Effects::none()
         }));
@@ -270,12 +269,12 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let sender = async_ctx.sender.clone();
+            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                sender.dispatch(effects);
+                queue.push(effects);
             });
             Effects::none()
         }));
@@ -283,88 +282,38 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
     }
 }
 
-// pub struct EffectsQueue<M: Model> {
-//     queue: VecDeque<Effects<M>>,
-// }
-
-#[derive(Debug)]
-pub struct EffectSender<M: Model> {
-    pub(crate) tx: crossbeam_channel::Sender<Effects<M>>,
-    phantom: PhantomData<M>,
+#[derive(Debug, Deref, DerefMut, IntoIterator)]
+pub struct EffectsQueue<M: Model> {
+    queue: Arc<SegQueue<Effects<M>>>,
 }
 
-impl<M: Model> Clone for EffectSender<M> {
+impl<M: Model> Clone for EffectsQueue<M> {
     fn clone(&self) -> Self {
         Self {
-            tx: self.tx.clone(),
-            phantom: PhantomData,
+            queue: Arc::clone(&self.queue)
         }
     }
 }
 
-pub struct EffectReceiver<M: Model> {
-    pub(crate) rx: crossbeam_channel::Receiver<Effects<M>>,
-    phantom: PhantomData<M>,
-}
-
-impl<M: Model> std::fmt::Debug for EffectReceiver<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EffectBus")
-            .field("rx", &self.rx)
-            .field("middlewares", &"<middlewares>")
-            .field("phantom", &self.phantom)
-            .finish()
-    }
-}
-
-#[derive(Debug, Builder)]
-pub struct EffectQueue<M: Model> {
-    pub(crate) effect_sender: EffectSender<M>,
-    pub(crate) effect_receiver: EffectReceiver<M>,
-}
-
-impl<M: Model> Default for EffectQueue<M> {
+impl<M: Model> Default for EffectsQueue<M> {
     fn default() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let effect_sender = EffectSender {
-            tx,
-            phantom: PhantomData,
-        };
-        let effect_receiver = EffectReceiver {
-            rx,
-            // middlewares: None,
-            phantom: PhantomData,
-        };
         Self {
-            effect_sender,
-            effect_receiver,
+            queue: Arc::default(),
         }
     }
 }
 
-impl<M: Model> EffectSender<M> {
-    #[inline]
-    pub fn dispatch(&self, effects: Effects<M>) {
-        self.tx
-            .send(effects)
-            .expect("Effect bus channel unexpectedly closed");
-    }
-}
-
-impl<M: Model> EffectReceiver<M> {
+impl<M: Model> EffectsQueue<M> {
     #[must_use]
     #[inline]
     pub(crate) fn next_batch(&mut self) -> Option<Effects<M>> {
-        match self.rx.try_recv() {
-            Ok(effect) => Some(effect),
-            Err(_) => None,
-        }
+        self.pop()
     }
 }
 
 pub trait DispatchEffect: Context {
-    fn effect_sender(&self) -> &EffectSender<Self::Model>;
-
+    fn effects_queue(&self) -> &EffectsQueue<Self::Model>;
+    #[inline]
     fn trigger<F>(&self, effect: F)
     where
         F: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
@@ -374,13 +323,17 @@ pub trait DispatchEffect: Context {
             effect(ctx);
             Effects::none()
         }));
-        self.effect_sender().dispatch(effects);
+        self.effects_queue().push(effects);
     }
 
+    #[must_use]
+    #[inline]
     fn dispatch(&self, effects: impl Into<Effects<Self::Model>>) {
-        self.effect_sender().dispatch(effects.into());
+        self.effects_queue().push(effects.into());
     }
 
+    #[must_use]
+    #[inline]
     fn dispatch_sync(&self, effect: impl EffectFn<Self::Model>) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         let mut effects = Effects::with_capacity(1);
@@ -390,24 +343,7 @@ pub trait DispatchEffect: Context {
             result
         };
         effects.push(Box::new(wrapped_effect));
-        self.effect_sender().dispatch(effects);
+        self.effects_queue().push(effects.into());
         rx
-    }
-
-    fn spawn<F, O, P>(&self, task: F, perf: P) -> impl EffectFn<Self::Model>
-    where
-        F: SpawnFn<Self::Model, O>,
-        O: Send + Sync + 'static,
-        P: PerformFn<Self::Model, O>,
-    {
-        ThreadTask::new(task).perform(perf)
-    }
-    fn task<F, O, P>(&self, task: F, perf: P) -> impl EffectFn<Self::Model>
-    where
-        F: TaskFn<Self::Model, O>,
-        O: Send + Sync + 'static,
-        P: PerformFn<Self::Model, O>,
-    {
-        AsyncTask::new(task).perform(perf)
     }
 }
