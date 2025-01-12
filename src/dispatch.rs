@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use crossbeam_queue::SegQueue;
@@ -90,7 +91,7 @@ impl<M: Model, O: Send + Sync + 'static> ThreadTask<M, O> {
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                queue.push(effects);
+                queue.lock().unwrap().push_back(effects);
             });
             Effects::none()
         }
@@ -138,7 +139,7 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                queue.push(effects);
+                queue.lock().unwrap().push_back(effects);
             });
             Effects::none()
         }
@@ -235,7 +236,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                queue.push(effects);
+                queue.lock().unwrap().push_back(effects);
             });
             Effects::none()
         }));
@@ -251,7 +252,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
             let task = self.task.inner.take().unwrap();
             tokio::spawn(async move {
                 let _ = task.call(async_ctx).await;
-                queue.push(Effects::none());
+                queue.lock().unwrap().push_back(Effects::none());
             });
             Effects::none()
         }));
@@ -274,7 +275,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                queue.push(effects);
+                queue.lock().unwrap().push_back(effects);
             });
             Effects::none()
         }));
@@ -282,9 +283,17 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
     }
 }
 
-#[derive(Debug, Deref, DerefMut, IntoIterator)]
+#[derive(Deref, DerefMut, IntoIterator)]
 pub struct EffectsQueue<M: Model> {
-    queue: Arc<SegQueue<Effects<M>>>,
+    queue: Arc<Mutex<VecDeque<Effects<M>>>>,
+}
+
+impl<M: Model> std::fmt::Debug for EffectsQueue<M> where M: Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EffectsQueue")
+            .field("queue", &"<queue>")
+            .finish()
+    }
 }
 
 impl<M: Model> Clone for EffectsQueue<M> {
@@ -298,7 +307,7 @@ impl<M: Model> Clone for EffectsQueue<M> {
 impl<M: Model> Default for EffectsQueue<M> {
     fn default() -> Self {
         Self {
-            queue: Arc::default(),
+            queue: Arc::new(Mutex::new(VecDeque::with_capacity(1024))),
         }
     }
 }
@@ -307,7 +316,7 @@ impl<M: Model> EffectsQueue<M> {
     #[must_use]
     #[inline]
     pub(crate) fn next_batch(&mut self) -> Option<Effects<M>> {
-        self.pop()
+        self.lock().unwrap().pop_front()
     }
 }
 
@@ -323,13 +332,13 @@ pub trait DispatchEffect: Context {
             effect(ctx);
             Effects::none()
         }));
-        self.effects_queue().push(effects);
+        self.effects_queue().lock().unwrap().push_back(effects);
     }
 
     #[must_use]
     #[inline]
     fn dispatch(&self, effects: impl Into<Effects<Self::Model>>) {
-        self.effects_queue().push(effects.into());
+        self.effects_queue().lock().unwrap().push_back(effects.into());
     }
 
     #[must_use]
@@ -343,7 +352,7 @@ pub trait DispatchEffect: Context {
             result
         };
         effects.push(Box::new(wrapped_effect));
-        self.effects_queue().push(effects.into());
+        self.effects_queue().lock().unwrap().push_back(effects);
         rx
     }
 }

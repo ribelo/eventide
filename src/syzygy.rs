@@ -36,7 +36,7 @@ impl<M: Model> Syzygy<M> {
                 let new_messages = (effect)(self);
                 if !new_messages.is_empty() {
                     // Add new messages to end of queue
-                    self.effects_queue.push(new_messages);
+                    self.effects_queue.lock().unwrap().push_back(new_messages);
                 }
             }
         }
