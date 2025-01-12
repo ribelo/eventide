@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use arrayvec::ArrayVec;
 use async_trait::async_trait;
-use crossbeam_queue::SegQueue;
 use derive_more::derive::{Deref, DerefMut, IntoIterator};
 use tokio::sync::oneshot;
 
@@ -148,7 +148,7 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
 
 #[derive(Deref, DerefMut, IntoIterator)]
 pub struct Effects<M: Model> {
-    pub(crate) items: Vec<Box<dyn EffectFn<M>>>,
+    pub(crate) items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
 }
 
 impl<E: EffectFn<M>, M: Model> From<E> for Effects<M> {
@@ -162,7 +162,7 @@ impl<E: EffectFn<M>, M: Model> From<E> for Effects<M> {
 impl<M: Model> Default for Effects<M> {
     fn default() -> Self {
         Self {
-            items: Vec::default(),
+            items: ArrayVec::new(),
         }
     }
 }
@@ -173,12 +173,12 @@ impl<M: Model> Effects<M> {
         Self::default()
     }
 
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            items: Vec::with_capacity(capacity),
-        }
-    }
+    // #[must_use]
+    // pub fn with_capacity(capacity: usize) -> Self {
+    //     Self {
+    //         items: ArrayVec::with_capacity(capacity),
+    //     }
+    // }
 
     #[must_use]
     pub fn none() -> Self {
@@ -222,7 +222,7 @@ impl<M: Model> Effects<M> {
 
 pub struct UnfinishedAsyncEffects<M: Model, O: Send + Sync + 'static> {
     task: AsyncTask<M, O>,
-    items: Vec<Box<dyn EffectFn<M>>>,
+    items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
 }
 
 impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
@@ -262,7 +262,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
 
 pub struct UnfinishedThreadEffects<M: Model, O: Send + Sync + 'static> {
     task: ThreadTask<M, O>,
-    items: Vec<Box<dyn EffectFn<M>>>,
+    items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
 }
 
 impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
@@ -288,7 +288,10 @@ pub struct EffectsQueue<M: Model> {
     queue: Arc<Mutex<VecDeque<Effects<M>>>>,
 }
 
-impl<M: Model> std::fmt::Debug for EffectsQueue<M> where M: Model {
+impl<M: Model> std::fmt::Debug for EffectsQueue<M>
+where
+    M: Model,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EffectsQueue")
             .field("queue", &"<queue>")
@@ -299,7 +302,7 @@ impl<M: Model> std::fmt::Debug for EffectsQueue<M> where M: Model {
 impl<M: Model> Clone for EffectsQueue<M> {
     fn clone(&self) -> Self {
         Self {
-            queue: Arc::clone(&self.queue)
+            queue: Arc::clone(&self.queue),
         }
     }
 }
@@ -327,7 +330,7 @@ pub trait DispatchEffect: Context {
     where
         F: FnOnce(&mut Syzygy<Self::Model>) + Send + Sync + 'static,
     {
-        let mut effects = Effects::with_capacity(1);
+        let mut effects = Effects::new();
         effects.push(Box::new(move |ctx: &mut Syzygy<Self::Model>| {
             effect(ctx);
             Effects::none()
@@ -335,17 +338,26 @@ pub trait DispatchEffect: Context {
         self.effects_queue().lock().unwrap().push_back(effects);
     }
 
-    #[must_use]
     #[inline]
     fn dispatch(&self, effects: impl Into<Effects<Self::Model>>) {
-        self.effects_queue().lock().unwrap().push_back(effects.into());
+        let effects = effects.into();
+        let mut queue = self.effects_queue().lock().expect("Queue lock poisoned");
+        if let Some(last) = queue.back_mut() {
+            if last.items.is_full() {
+                queue.push_back(effects);
+            } else {
+                last.items.extend(effects.items);
+            }
+        } else {
+            queue.push_back(effects);
+        }
     }
 
     #[must_use]
     #[inline]
     fn dispatch_sync(&self, effect: impl EffectFn<Self::Model>) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
-        let mut effects = Effects::with_capacity(1);
+        let mut effects = Effects::new();
         let wrapped_effect = move |ctx: &mut Syzygy<Self::Model>| {
             let result = (effect)(ctx);
             let _ = tx.send(());

@@ -673,6 +673,21 @@ mod tests {
     // //     handle.join().unwrap();
     // //     assert!(!cx.is_running());
     // // }
+    #[cfg(not(feature = "parallel"))]
+    #[tokio::test]
+    async fn test_increment_dispatch() {
+        let model = TestModel { counter: 0 };
+        let mut syzygy = Syzygy::builder().model(model).build();
+
+        const ITERATIONS: usize = 1_000_000;
+
+        for _ in 0..ITERATIONS {
+            syzygy.dispatch(increment);
+        }
+        syzygy.handle_effects();
+
+        assert_eq!(syzygy.model().counter, ITERATIONS as i32);
+    }
     // #[ignore]
     #[cfg(not(feature = "parallel"))]
     #[tokio::test]
@@ -682,7 +697,7 @@ mod tests {
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder().model(model.clone()).build();
 
-        const ITERATIONS: usize = 1_000_000;
+        const ITERATIONS: usize = 10_000_000;
         const RUNS: usize = 10;
 
         let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
@@ -704,8 +719,8 @@ mod tests {
     #[cfg(not(feature = "parallel"))]
     #[tokio::test]
     async fn test_task_performance() {
-        use std::time::Instant;
         use crate::dispatch::AsyncTask;
+        use std::time::Instant;
 
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder().model(model.clone()).build();
@@ -718,9 +733,7 @@ mod tests {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
                 let effects = Effects::new()
-                    .task(
-                        async |_| (),
-                    )
+                    .task(async |_| ())
                     .perform(|_| Effects::from(increment));
                 syzygy.dispatch(effects);
             }
