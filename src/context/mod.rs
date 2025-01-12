@@ -1,7 +1,6 @@
 use crate::model::Model;
 
 pub mod r#async;
-pub mod thread;
 
 pub trait Context: Sized {
     type Model: Model;

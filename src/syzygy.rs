@@ -1,18 +1,13 @@
 use bon::Builder;
 
 use crate::{
-    context::{Context, FromContext},
-    dispatch::{EffectQueue, Message},
+    context::Context,
+    dispatch::EffectQueue,
     model::{Model, ModelAccess, ModelModify, ModelSnapshotCreate},
-    prelude::{AsyncContext, ThreadContext},
     resource::{ResourceAccess, ResourceModify, Resources},
-    spawn::SpawnThread,
 };
 
 use crate::dispatch::{DispatchEffect, EffectSender};
-#[cfg(feature = "parallel")]
-use crate::spawn::{RayonPool, SpawnParallel};
-use crate::spawn::{SpawnAsync, TokioHandle};
 
 #[derive(Debug, Builder)]
 pub struct Syzygy<M: Model> {
@@ -20,8 +15,6 @@ pub struct Syzygy<M: Model> {
     pub resources: Resources,
     #[builder(field)]
     pub effect_bus: EffectQueue<M>,
-    #[builder(into)]
-    pub tokio_handle: TokioHandle,
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
@@ -36,61 +29,18 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
         self.resources.insert(resource);
         self
     }
-    pub fn effect_hook<H>(mut self, hook: H) -> SyzygyBuilder<M, S>
-    where
-        H: Fn() + Send + Sync + 'static,
-    {
-        self.effect_bus.effect_sender.effect_hook = Some(Box::new(hook));
-        self
-    }
 }
 
 impl<M: Model> Syzygy<M> {
-    pub fn effect_hook<H>(&mut self, hook: H)
-    where
-        H: Fn() + Send + Sync + 'static,
-    {
-        self.effect_bus.effect_sender.effect_hook = Some(Box::new(hook));
-    }
-
     pub fn handle_effects(&mut self) {
-        while let Some(mut batch) = self.effect_bus.effect_receiver.next_batch() {
+        while let Some(batch) = self.effect_bus.effect_receiver.next_batch() {
             let sender = self.effect_bus.effect_sender.clone();
-
-            // Process all Commands in sequence until encountering a Task/AsyncTask
-            while let Some(message) = batch.pop_front() {
-                match message {
-                    Message::Cmd(cmd) => {
-                        let new_messages = cmd.run(self);
-                        if !new_messages.is_empty() {
-                            // Add new messages to end of queue
-                            self.send(new_messages);
-                        }
-                    }
-                    Message::Task(task) => {
-                        let ctx = ThreadContext::from_context(self);
-                        std::thread::spawn(move || {
-                            let new_messages = task.run(ctx);
-                            if !new_messages.is_empty() {
-                                // Add new effects to end of current batch
-                                batch.extend(new_messages);
-                                sender.dispatch(batch);
-                            }
-                        });
-                        break; // Break loop, remainder will process after task completion
-                    }
-                    Message::AsyncTask(async_task) => {
-                        let ctx = AsyncContext::from_context(self);
-                        self.tokio_handle.spawn(async move {
-                            let new_messages = async_task.run(ctx).await;
-                            if !new_messages.is_empty() {
-                                batch.extend(new_messages);
-                                sender.dispatch(batch);
-                            }
-                        });
-                        break; // Break loop, remainder will process after async task completion
-                    }
-                };
+            for effect in batch {
+                let new_messages = (effect)(self);
+                if !new_messages.is_empty() {
+                    // Add new messages to end of queue
+                    sender.dispatch(new_messages);
+                }
             }
         }
     }
@@ -137,21 +87,6 @@ impl<M: Model> DispatchEffect for Syzygy<M> {
     }
 }
 
-impl<M: Model> SpawnThread for Syzygy<M> {}
-
-impl<M: Model> SpawnAsync for Syzygy<M> {
-    fn tokio_handle(&self) -> &TokioHandle {
-        &self.tokio_handle
-    }
-}
-
-#[cfg(feature = "parallel")]
-impl<M: Model> SpawnParallel<M> for Syzygy<M> {
-    fn rayon_pool(&self) -> &RayonPool {
-        &self.rayon_pool
-    }
-}
-
 pub struct Deferred<F: FnOnce()>(Option<F>);
 
 impl<F: FnOnce()> Deferred<F> {
@@ -180,10 +115,8 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 #[cfg(test)]
 mod tests {
 
-    use async_trait::async_trait;
-
     use super::*;
-    use crate::dispatch::{AsyncTask, Command, Messages, Task};
+    use crate::dispatch::Effects;
 
     #[derive(Debug, Clone)]
     struct TestModel {
@@ -202,43 +135,35 @@ mod tests {
         name: String,
     }
 
-    #[derive(Debug)]
-    pub struct IncrementCmd;
-
-    impl Command<TestModel> for IncrementCmd {
-        fn run(self: Box<Self>, syzygy: &mut Syzygy<TestModel>) -> Messages<TestModel> {
-            syzygy.model_mut().counter += 1;
-            Messages::none()
-        }
+    pub fn increment(syzygy: &mut Syzygy<TestModel>) -> Effects<TestModel> {
+        syzygy.model_mut().counter += 1;
+        Effects::none()
     }
 
-    #[derive(Debug)]
-    pub struct IncrementTask;
+    // impl Task<TestModel> for IncrementTask {
+    //     fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Batch<TestModel> {
+    //         std::thread::spawn(|| println!("hello from thread task"));
+    //         Batch::none().and_then_cmd(IncrementCmd)
+    //     }
+    // }
 
-    impl Task<TestModel> for IncrementTask {
-        fn run(self: Box<Self>, ctx: ThreadContext<TestModel>) -> Messages<TestModel> {
-            Messages::none().and_then_cmd(IncrementCmd)
-        }
-    }
+    // #[derive(Debug)]
+    // pub struct IncrementAsyncTask;
 
-    #[derive(Debug)]
-    pub struct IncrementAsyncTask;
-
-    #[async_trait]
-    impl AsyncTask<TestModel> for IncrementAsyncTask {
-        async fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Messages<TestModel> {
-            Messages::none().and_then_cmd(IncrementCmd)
-        }
-    }
+    // #[async_trait]
+    // impl AsyncTask<TestModel> for IncrementAsyncTask {
+    //     async fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Batch<TestModel> {
+    //         tokio::spawn(async { println!("hello from async task") });
+    //         Batch::none().and_then_cmd(IncrementCmd)
+    //     }
+    // }
 
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_model() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_model() {
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder()
             .model(model)
-            .tokio_handle(rt.handle().clone())
             .build();
 
         // Test initial state
@@ -264,9 +189,8 @@ mod tests {
     }
 
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_resources() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_resources() {
         let model = TestModel { counter: 0 };
         let test_resource = TestResource {
             name: "test_str".to_string(),
@@ -274,7 +198,6 @@ mod tests {
         let syzygy = Syzygy::builder()
             .model(model)
             .resource(test_resource)
-            .tokio_handle(rt.handle().clone())
             .build();
 
         // Test accessing existing TestResource
@@ -287,18 +210,16 @@ mod tests {
     }
 
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_async_dispatch() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_async_dispatch() {
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
-            .tokio_handle(rt.handle().clone())
             .build();
 
         // Dispatch the effect multiple times
         for _ in 0..5 {
-            syzygy.dispatch(IncrementCmd);
+            syzygy.dispatch(|cx: &mut Syzygy<TestModel>| increment(cx));
         }
 
         syzygy.handle_effects();
@@ -306,16 +227,14 @@ mod tests {
         assert_eq!(syzygy.model().counter, 5);
     }
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_sync_dispatch() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_sync_dispatch() {
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
-            .tokio_handle(rt.handle().clone())
             .build();
 
-        let rx = syzygy.dispatch_sync(IncrementCmd);
+        let rx = syzygy.dispatch_sync(increment);
 
         syzygy.handle_effects();
         rx.blocking_recv().unwrap();
@@ -323,41 +242,51 @@ mod tests {
         assert_eq!(syzygy.model().counter, 1);
     }
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_thread_task() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    #[tokio::test]
+    async fn test_thread_task() {
+        use crate::dispatch::ThreadTask;
+
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
-            .tokio_handle(rt.handle().clone())
             .build();
 
-        syzygy.task(IncrementTask);
+        let effects = Effects::new()
+            .spawn(
+                |_| print!("hello from thread task"),
+                |_| Effects::from(increment),
+            )
+            .effect(
+                ThreadTask::new(|_| print!("hello from thread task"))
+                    .and_then(|_| println!("hello from thread task"))
+                    .perform(|_| Effects::from(increment)),
+            );
+        syzygy.dispatch(effects);
 
         syzygy.handle_effects();
         std::thread::sleep(std::time::Duration::from_millis(100));
         syzygy.handle_effects();
 
-        assert_eq!(syzygy.model().counter, 1);
+        assert_eq!(syzygy.model().counter, 2);
     }
-    #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_async_task() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-            .model(model)
-            .tokio_handle(rt.handle().clone())
-            .build();
+    // #[cfg(not(feature = "parallel"))]
+    // #[test]
+    // fn test_async_task() {
+    //     let rt = tokio::runtime::Runtime::new().unwrap();
+    //     let model = TestModel { counter: 0 };
+    //     let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
+    //         .model(model)
+    //         .tokio_handle(rt.handle().clone())
+    //         .build();
 
-        syzygy.async_task(IncrementAsyncTask);
+    //     syzygy.async_task(IncrementAsyncTask);
 
-        syzygy.handle_effects();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        syzygy.handle_effects();
+    //     syzygy.handle_effects();
+    //     std::thread::sleep(std::time::Duration::from_millis(100));
+    //     syzygy.handle_effects();
 
-        assert_eq!(syzygy.model().counter, 1);
-    }
+    //     assert_eq!(syzygy.model().counter, 1);
+    // }
 
     // // #[test]
     // // #[cfg(not(feature = "async"))]
@@ -757,35 +686,23 @@ mod tests {
     // // }
     // #[ignore]
     #[cfg(not(feature = "parallel"))]
-    #[test]
-    fn test_dispatch_performance() {
+    #[tokio::test]
+    async fn test_dispatch_performance() {
         use std::time::Instant;
 
-        use crate::dispatch::Command;
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder()
             .model(model.clone())
-            .tokio_handle(rt.handle().clone())
             .build();
 
         const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
 
-        #[derive(Debug)]
-        pub struct TestCommand;
-        impl Command<TestModel> for TestCommand {
-            fn run(self: Box<Self>, syzygy: &mut Syzygy<TestModel>) -> Messages<TestModel> {
-                Messages::none()
-            }
-        }
-
         let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                syzygy.dispatch(TestCommand);
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| Effects::none());
             }
             syzygy.handle_effects();
             let duration = start.elapsed();
@@ -798,15 +715,13 @@ mod tests {
         );
     }
     #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
-    #[test]
-    fn benchmark_direct_model_update() {
+    #[tokio::test]
+    async fn benchmark_direct_model_update() {
         use std::time::Instant;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
             .model(model)
-            .tokio_handle(rt.handle().clone())
             .build();
 
         const ITERATIONS: usize = 1_000_000;

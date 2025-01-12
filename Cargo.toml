@@ -15,7 +15,7 @@ parallel = ["dep:rayon"]
 thiserror = "1.0"
 rustc-hash = "2"
 rayon = { version = "1.10", optional = true }
-tokio = { version = "1.4", features = ["rt-multi-thread", "sync"]}
+tokio = { version = "1.4", features = ["rt-multi-thread", "sync", "macros"] }
 downcast-rs = "1.2"
 log = "0.4"
 bon = "3.3.0"
