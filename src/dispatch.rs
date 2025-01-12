@@ -148,7 +148,7 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
 
 #[derive(Deref, DerefMut, IntoIterator)]
 pub struct Effects<M: Model> {
-    pub(crate) items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
+    pub(crate) items: ArrayVec<Box<dyn EffectFn<M>>, 8>,
 }
 
 impl<E: EffectFn<M>, M: Model> From<E> for Effects<M> {
@@ -222,7 +222,7 @@ impl<M: Model> Effects<M> {
 
 pub struct UnfinishedAsyncEffects<M: Model, O: Send + Sync + 'static> {
     task: AsyncTask<M, O>,
-    items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
+    items: ArrayVec<Box<dyn EffectFn<M>>, 8>,
 }
 
 impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
@@ -262,7 +262,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
 
 pub struct UnfinishedThreadEffects<M: Model, O: Send + Sync + 'static> {
     task: ThreadTask<M, O>,
-    items: ArrayVec<Box<dyn EffectFn<M>>, 32>,
+    items: ArrayVec<Box<dyn EffectFn<M>>, 8>,
 }
 
 impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {

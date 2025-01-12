@@ -697,10 +697,11 @@ mod tests {
         let model = TestModel { counter: 0 };
         let mut syzygy = Syzygy::builder().model(model.clone()).build();
 
-        const ITERATIONS: usize = 10_000_000;
+        const ITERATIONS: usize = 1_000_000;
         const RUNS: usize = 10;
 
-        let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
+        // Test one chain of empty effects
+        let mut best_empty = std::time::Duration::from_secs(u64::MAX);
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
@@ -708,13 +709,178 @@ mod tests {
             }
             syzygy.handle_effects();
             let duration = start.elapsed();
-            best_dispatch = best_dispatch.min(duration);
+            best_empty = best_empty.min(duration);
         }
-        let ops_dispatch = ITERATIONS as f64 / best_dispatch.as_secs_f64();
+        let ops_empty = ITERATIONS as f64 / best_empty.as_secs_f64();
 
-        println!(
-            "Effect dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)"
-        );
+        // Test multiple small chains of empty effects
+        let mut best_chain = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
+                    Effects::<TestModel>::none().effect(|_| Effects::none())
+                });
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
+                    Effects::<TestModel>::none().effect(|_| Effects::none())
+                });
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
+                    Effects::<TestModel>::none().effect(|_| Effects::none())
+                });
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
+                    Effects::<TestModel>::none().effect(|_| Effects::none())
+                });
+                syzygy.handle_effects();
+            }
+            let duration = start.elapsed();
+            best_chain = best_chain.min(duration);
+        }
+        let ops_chain = ITERATIONS as f64 / best_chain.as_secs_f64();
+
+        // Test model mutation effects
+        let mut best_mutation = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
+                    cx.model_mut().counter += 1;
+                    Effects::none()
+                });
+            }
+            syzygy.handle_effects();
+            let duration = start.elapsed();
+            best_mutation = best_mutation.min(duration);
+        }
+        let ops_mutation = ITERATIONS as f64 / best_mutation.as_secs_f64();
+
+        // Test chained effects
+        let mut best_chained = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
+                    Effects::<TestModel>::none()
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            cx.model_mut().counter += 1;
+                            Effects::none()
+                        })
+                });
+            }
+            syzygy.handle_effects();
+            let duration = start.elapsed();
+            best_chained = best_chained.min(duration);
+        }
+        let ops_chained = ITERATIONS as f64 / best_chained.as_secs_f64();
+
+        // Real scenario
+        let mut best_real = std::time::Duration::from_secs(u64::MAX);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
+                    // Simulate a more complex real-world scenario with
+                    // multiple branching effects and state updates
+                    let effect = Effects::<TestModel>::none();
+
+                    // Update some base state
+                    cx.model_mut().counter += 1;
+
+                    // Chain some conditional effects
+                    effect
+                        .effect(|cx| {
+                            if cx.model().counter % 2 == 0 {
+                                cx.model_mut().counter += 2;
+                                Effects::<TestModel>::none().effect(|cx| {
+                                    cx.model_mut().counter *= 2;
+                                    Effects::none()
+                                })
+                            } else {
+                                cx.model_mut().counter -= 1;
+                                Effects::<TestModel>::none().effect(|cx| {
+                                    cx.model_mut().counter += 5;
+                                    Effects::none()
+                                })
+                            }
+                        })
+                        .effect(|cx| {
+                            // Another conditional branch
+                            if cx.model().counter > 100 {
+                                cx.model_mut().counter = 0;
+                            }
+                            Effects::none()
+                        })
+                        .effect(|cx| {
+                            // Simulate some expensive computation
+                            let mut total = 0;
+                            for i in 0..cx.model().counter {
+                                total += i;
+                            }
+                            cx.model_mut().counter = total;
+                            Effects::none()
+                        })
+                });
+            }
+            syzygy.handle_effects();
+            let duration = start.elapsed();
+            best_real = best_real.min(duration);
+        }
+        let ops_real = ITERATIONS as f64 / best_real.as_secs_f64();
+
+        println!("Performance Results:");
+        println!("-------------------");
+        println!("Empty effects:");
+        println!("  Iterations: {ITERATIONS}");
+        println!("  Time: {best_empty:?}");
+        println!("  Speed: {ops_empty:.2} ops/sec");
+        println!();
+        println!("Mutation effects:");
+        println!("  Iterations: {ITERATIONS}");
+        println!("  Time: {best_mutation:?}");
+        println!("  Speed: {ops_mutation:.2} ops/sec");
+        println!();
+        println!("Big chain of empty effects:");
+        println!("  Iterations: {ITERATIONS}");
+        println!("  Time: {best_chained:?}");
+        println!("  Speed: {ops_chained:.2} ops/sec");
+        println!();
+        println!("Small chains of empty effects:");
+        println!("  Iterations: {ITERATIONS}");
+        println!("  Time: {best_chain:?}");
+        println!("  Speed: {ops_chain:.2} ops/sec");
+        println!();
+        println!("Real scenario:");
+        println!("  Iterations: {ITERATIONS}");
+        println!("  Time: {best_real:?}");
+        println!("  Speed: {ops_real:.2} ops/sec");
+        println!();
     }
     #[cfg(not(feature = "parallel"))]
     #[tokio::test]
