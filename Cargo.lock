@@ -339,7 +339,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall",
- "smallvec",
+ "smallvec 1.13.2",
  "windows-targets",
 ]
 
@@ -437,6 +437,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 
 [[package]]
+name = "smallvec"
+version = "2.0.0-alpha.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e22442b16a0c1bfae679ffed8ec5e160ae2aa8495cea891f0d2ff7b84fe5c4c"
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -471,7 +477,7 @@ dependencies = [
  "object-pool",
  "rayon",
  "rustc-hash",
- "smallvec",
+ "smallvec 2.0.0-alpha.9",
  "thiserror",
  "tokio",
 ]

@@ -1,4 +1,5 @@
 #![feature(downcast_unchecked)]
+#![feature(min_specialization)]
 pub mod context;
 pub mod dispatch;
 pub mod model;

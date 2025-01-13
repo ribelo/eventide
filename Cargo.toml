@@ -26,7 +26,7 @@ async-trait = "0.1.85"
 crossbeam-channel = "0.5.14"
 crossbeam-queue = "0.3.12"
 object-pool = "0.6.0"
-smallvec = "1.13.2"
+smallvec = {version = "2.0.0-alpha.9", features = ["specialization"]}
 arrayvec = "0.7.6"
 
 [dev-dependencies]
