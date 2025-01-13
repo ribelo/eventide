@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -55,6 +55,14 @@ where
 {
 }
 
+pub fn after_task<M: Model>(rx: crossbeam_channel::Receiver<Effects<M>>) -> Effects<M> {
+    if let Ok(effects) = rx.try_recv() {
+        effects
+    } else {
+        Effects::none().effect(move |_| after_task(rx))
+    }
+}
+
 pub struct ThreadTask<M: Model, O: Send + Sync + 'static> {
     inner: Option<Box<dyn SpawnFn<M, O>>>,
 }
@@ -86,14 +94,14 @@ impl<M: Model, O: Send + Sync + 'static> ThreadTask<M, O> {
     pub fn perform(mut self, f: impl PerformFn<M, O>) -> impl EffectFn<M> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let queue = async_ctx.effects_queue.clone();
             let task = self.inner.take().unwrap();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                queue.lock().unwrap().push_back(effects);
+                tx.send(effects).unwrap();
             });
-            Effects::none()
+            after_task(rx)
         }
     }
 }
@@ -134,14 +142,14 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
     pub fn perform(mut self, f: impl PerformFn<M, O>) -> impl EffectFn<M> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let queue = async_ctx.effects_queue.clone();
             let task = self.inner.take().unwrap();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                queue.lock().unwrap().push_back(effects);
+                tx.send(effects).unwrap();
             });
-            Effects::none()
+            after_task(rx)
         }
     }
 }
@@ -231,14 +239,14 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
-                queue.lock().unwrap().push_back(effects);
+                tx.send(effects).unwrap();
             });
-            Effects::none()
+            after_task(rx)
         }));
         effects
     }
@@ -248,11 +256,9 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedAsyncEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
             tokio::spawn(async move {
                 let _ = task.call(async_ctx).await;
-                queue.lock().unwrap().push_back(Effects::none());
             });
             Effects::none()
         }));
@@ -270,14 +276,14 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
         let mut effects = Effects { items: self.items };
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
-            let queue = async_ctx.effects_queue.clone();
             let task = self.task.inner.take().unwrap();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
-                queue.lock().unwrap().push_back(effects);
+                tx.send(effects).unwrap();
             });
-            Effects::none()
+            after_task(rx)
         }));
         effects
     }
@@ -285,7 +291,7 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
 
 #[derive(Deref, DerefMut, IntoIterator)]
 pub struct EffectsQueue<M: Model> {
-    queue: Arc<Mutex<VecDeque<Effects<M>>>>,
+    queue: RefCell<Vec<Box<dyn EffectFn<M>>>>,
 }
 
 impl<M: Model> std::fmt::Debug for EffectsQueue<M>
@@ -299,27 +305,19 @@ where
     }
 }
 
-impl<M: Model> Clone for EffectsQueue<M> {
-    fn clone(&self) -> Self {
-        Self {
-            queue: Arc::clone(&self.queue),
-        }
-    }
-}
-
 impl<M: Model> Default for EffectsQueue<M> {
     fn default() -> Self {
         Self {
-            queue: Arc::new(Mutex::new(VecDeque::with_capacity(1024))),
+            queue: RefCell::new(Vec::with_capacity(32)),
         }
     }
 }
 
 impl<M: Model> EffectsQueue<M> {
-    #[must_use]
-    #[inline]
-    pub(crate) fn next_batch(&mut self) -> Option<Effects<M>> {
-        self.lock().unwrap().pop_front()
+    pub fn replace(&mut self, effects: Vec<Box<dyn EffectFn<M>>>) {
+        let mut queue = self.queue.borrow_mut();
+        queue.clear();
+        queue.extend(effects);
     }
 }
 
@@ -335,22 +333,13 @@ pub trait DispatchEffect: Context {
             effect(ctx);
             Effects::none()
         }));
-        self.effects_queue().lock().unwrap().push_back(effects);
+        self.effects_queue().borrow_mut().extend(effects);
     }
 
     #[inline]
     fn dispatch(&self, effects: impl Into<Effects<Self::Model>>) {
         let effects = effects.into();
-        let mut queue = self.effects_queue().lock().expect("Queue lock poisoned");
-        if let Some(last) = queue.back_mut() {
-            if last.items.is_full() {
-                queue.push_back(effects);
-            } else {
-                last.items.extend(effects.items);
-            }
-        } else {
-            queue.push_back(effects);
-        }
+        self.effects_queue().borrow_mut().extend(effects);
     }
 
     #[must_use]
@@ -364,7 +353,7 @@ pub trait DispatchEffect: Context {
             result
         };
         effects.push(Box::new(wrapped_effect));
-        self.effects_queue().lock().unwrap().push_back(effects);
+        self.effects_queue().borrow_mut().extend(effects);
         rx
     }
 }

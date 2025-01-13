@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::VecDeque};
+
 use bon::Builder;
 
 use crate::{
@@ -31,15 +33,15 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 
 impl<M: Model> Syzygy<M> {
     pub fn handle_effects(&mut self) {
-        while let Some(batch) = self.effects_queue.next_batch() {
-            for effect in batch {
-                let new_messages = (effect)(self);
-                if !new_messages.is_empty() {
-                    // Add new messages to end of queue
-                    self.effects_queue.lock().unwrap().push_back(new_messages);
-                }
+        let mut new_queue = Vec::with_capacity(32);
+        for effect in self.effects_queue.take().into_iter() {
+            let new_messages = (effect)(self);
+            if !new_messages.is_empty() {
+                // Add new messages to end of queue
+                new_queue.extend(new_messages);
             }
         }
+        self.effects_queue.replace(new_queue);
     }
 }
 
