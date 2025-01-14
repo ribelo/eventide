@@ -1,11 +1,10 @@
-use std::sync::Arc;
-
 use crate::{
-    dispatch::EffectsQueue, model::{Model, ModelSnapshotAccess, ModelSnapshotCreate}, resource::{ResourceAccess, Resources}, syzygy::Syzygy
+    model::{Model, ModelSnapshotAccess, ModelSnapshotCreate},
+    resource::{ResourceAccess, Resources},
+    syzygy::Syzygy,
 };
 
 use bon::Builder;
-
 
 use super::{Context, FromContext};
 
@@ -36,6 +35,15 @@ impl<M: Model> FromContext<Syzygy<M>> for AsyncContext<M> {
         }
     }
 }
+
+// impl<'a, M: Model> FromContext<'a, EffectContext<'a, M>> for AsyncContext<M> {
+//     fn from_context(context: &'a mut EffectContext<'a, M>) -> Self {
+//         Self {
+//             model_snapshot: context.ctx.model.into_snapshot(),
+//             resources: context.resources().clone(),
+//         }
+//     }
+// }
 
 impl<M: Model> ModelSnapshotAccess for AsyncContext<M> {
     fn snapshot(&self) -> &<<Self as Context>::Model as Model>::Snapshot {

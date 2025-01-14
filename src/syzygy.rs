@@ -1,5 +1,3 @@
-use std::{cell::RefCell, collections::VecDeque};
-
 use bon::Builder;
 
 use crate::{
@@ -34,7 +32,7 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 impl<M: Model> Syzygy<M> {
     pub fn handle_effects(&mut self) {
         let mut new_queue = Vec::with_capacity(32);
-        for effect in self.effects_queue.take().into_iter() {
+        for effect in self.effects_queue.take() {
             let new_messages = (effect)(self);
             if !new_messages.is_empty() {
                 // Add new messages to end of queue
@@ -243,41 +241,59 @@ mod tests {
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
         let effects = Effects::new()
-            .spawn(
-                |_| print!("hello from thread task"),
-                |_| Effects::from(increment),
-            )
+            .spawn(|_| {
+                println!("hello from thread task 1");
+                1
+            })
+            .perform(|_x| Effects::from(increment))
             .effect(
-                ThreadTask::new(|_| print!("hello from thread task"))
-                    .and_then(|_| println!("hello from thread task"))
-                    .perform(|_| Effects::from(increment)),
+                ThreadTask::new(|_| println!("hello from thread task 2"))
+                    .and_then(|_| println!("hello from thread task 3"))
+                    .perform(|_| {
+                        println!("before increment ");
+                        Effects::from(increment)
+                    }),
             );
         syzygy.dispatch(effects);
 
         syzygy.handle_effects();
         std::thread::sleep(std::time::Duration::from_millis(100));
         syzygy.handle_effects();
+        syzygy.handle_effects();
+        syzygy.handle_effects();
 
         assert_eq!(syzygy.model().counter, 2);
     }
-    // #[cfg(not(feature = "parallel"))]
-    // #[test]
-    // fn test_async_task() {
-    //     let rt = tokio::runtime::Runtime::new().unwrap();
-    //     let model = TestModel { counter: 0 };
-    //     let mut syzygy: Syzygy<TestModel> = Syzygy::builder()
-    //         .model(model)
-    //         .tokio_handle(rt.handle().clone())
-    //         .build();
+    #[cfg(not(feature = "parallel"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_task() {
+        use crate::dispatch::AsyncTask;
 
-    //     syzygy.async_task(IncrementAsyncTask);
+        let model = TestModel { counter: 0 };
+        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
-    //     syzygy.handle_effects();
-    //     std::thread::sleep(std::time::Duration::from_millis(100));
-    //     syzygy.handle_effects();
+        let effects = Effects::new()
+            .task(async |_| println!("hello from thread task 1"))
+            .perform(|_| {
+                println!("hello form perform 1");
+                Effects::new().effect(increment)
+            })
+            .task(async |_| println!("hello from thread task 2"))
+            .perform(|_| {
+                println!("hello form perform 2");
+                Effects::new().effect(increment)
+            });
 
-    //     assert_eq!(syzygy.model().counter, 1);
-    // }
+        syzygy.dispatch(effects);
+
+        syzygy.handle_effects();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        syzygy.handle_effects();
+        syzygy.handle_effects();
+        syzygy.handle_effects();
+
+        assert_eq!(syzygy.model().counter, 2);
+    }
 
     // // #[test]
     // // #[cfg(not(feature = "async"))]
