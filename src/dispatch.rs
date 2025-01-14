@@ -77,11 +77,45 @@ where
     }
 }
 
-pub fn after_task<M: Model>(mut rx: oneshot::Receiver<Effects<M>>) -> Effects<M> {
-    if let Ok(effects) = rx.try_recv() {
-        effects
-    } else {
-        Effects::none().effect(move |_| after_task(rx))
+pub trait SyncProcessFn<M: Model>:
+    FnOnce(AsyncContext<M>, crossbeam_channel::Sender<Effects<M>>) + Send + Sync + 'static
+{
+}
+
+impl<M, F> SyncProcessFn<M> for F
+where
+    M: Model,
+    F: FnOnce(AsyncContext<M>, crossbeam_channel::Sender<Effects<M>>) + Send + Sync + 'static,
+{
+}
+
+#[async_trait]
+pub trait AsyncProcessFn<M: Model>: Send + Sync + 'static {
+    async fn call(self: Box<Self>, cx: AsyncContext<M>, tx: crossbeam_channel::Sender<Effects<M>>);
+}
+
+#[async_trait]
+impl<M, F, Fut> AsyncProcessFn<M> for F
+where
+    M: Model,
+    F: FnOnce(AsyncContext<M>, crossbeam_channel::Sender<Effects<M>>) -> Fut
+        + Send
+        + Sync
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    async fn call(self: Box<Self>, cx: AsyncContext<M>, tx: crossbeam_channel::Sender<Effects<M>>) {
+        (*self)(cx, tx).await
+    }
+}
+
+pub fn recurent_effects<M: Model>(rx: crossbeam_channel::Receiver<Effects<M>>) -> Effects<M> {
+    match rx.try_recv() {
+        Ok(effects) => effects,
+        Err(crossbeam_channel::TryRecvError::Empty) => {
+            Effects::none().effect(move |_| recurent_effects(rx))
+        }
+        Err(crossbeam_channel::TryRecvError::Disconnected) => Effects::none(),
     }
 }
 
@@ -116,13 +150,13 @@ impl<M: Model, O: Send + Sync + 'static> ThreadTask<M, O> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
             let task = self.inner.take().unwrap();
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
                 let _ = tx.send(effects);
             });
-            after_task(rx)
+            recurent_effects(rx)
         }
     }
 }
@@ -162,13 +196,13 @@ impl<M: Model, O: Send + Sync + 'static> AsyncTask<M, O> {
         move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
             let task = self.inner.take().unwrap();
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             tokio::spawn(async move {
                 let result = task.call(async_ctx).await;
                 let effects = (f)(result);
                 let _ = tx.send(effects);
             });
-            after_task(rx)
+            recurent_effects(rx)
         }
     }
 }
@@ -323,16 +357,23 @@ impl<M: Model, O: Send + Sync + 'static> UnfinishedThreadEffects<M, O> {
         effects.items.push(Box::new(move |ctx: &mut Syzygy<M>| {
             let async_ctx = AsyncContext::from_context(ctx);
             let task = self.task.inner.take().unwrap();
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = (task)(async_ctx);
                 let effects = (f)(result);
                 let _ = tx.send(effects);
             });
-            after_task(rx)
+            recurent_effects(rx)
         }));
         effects
     }
+}
+
+pub struct EffectsIter<M: Model, I>
+where
+    I: Iterator<Item = Box<dyn EffectFn<M>>>,
+{
+    inner: I,
 }
 
 #[derive(Deref, DerefMut, IntoIterator)]
