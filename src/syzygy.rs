@@ -2,7 +2,7 @@ use bon::Builder;
 
 use crate::{
     context::Context,
-    dispatch::{DispatchEffect, EffectsQueue},
+    dispatch::{DispatchEffect, EffectsBus, EffectsTx},
     model::{Model, ModelAccess, ModelModify, ModelSnapshotCreate},
     resource::{ResourceAccess, ResourceModify, Resources},
 };
@@ -12,7 +12,7 @@ pub struct Syzygy<M: Model> {
     #[builder(field)]
     pub resources: Resources,
     #[builder(field)]
-    pub effects_queue: EffectsQueue<M>,
+    pub effects_bus: EffectsBus<M>,
     #[cfg(feature = "parallel")]
     #[builder(into)]
     pub rayon_pool: RayonPool,
@@ -31,15 +31,9 @@ impl<M: Model, S: syzygy_builder::State> SyzygyBuilder<M, S> {
 
 impl<M: Model> Syzygy<M> {
     pub fn handle_effects(&mut self) {
-        let mut new_queue = Vec::with_capacity(32);
-        for effect in self.effects_queue.take() {
-            let new_messages = (effect)(self);
-            if !new_messages.is_empty() {
-                // Add new messages to end of queue
-                new_queue.extend(new_messages);
-            }
+        while let Ok(effect) = self.effects_bus.rx.try_recv() {
+            (effect)(self);
         }
-        self.effects_queue.replace(new_queue);
     }
 }
 
@@ -64,7 +58,7 @@ impl<M: Model> ModelModify for Syzygy<M> {
 impl<M: Model> ModelSnapshotCreate for Syzygy<M> {
     #[inline]
     fn create_snapshot(&self) -> <<Self as Context>::Model as Model>::Snapshot {
-        self.model.into_snapshot()
+        self.model.to_snapshot()
     }
 }
 
@@ -79,8 +73,8 @@ impl<M: Model> ResourceModify for Syzygy<M> {}
 
 impl<M: Model> DispatchEffect for Syzygy<M> {
     #[inline]
-    fn effects_queue(&self) -> &EffectsQueue<M> {
-        &self.effects_queue
+    fn effects_tx(&self) -> &EffectsTx<M> {
+        &self.effects_bus.tx
     }
 }
 
@@ -113,7 +107,6 @@ pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
 mod tests {
 
     use super::*;
-    use crate::dispatch::Effects;
 
     #[derive(Debug, Clone)]
     struct TestModel {
@@ -122,7 +115,7 @@ mod tests {
 
     impl Model for TestModel {
         type Snapshot = Self;
-        fn into_snapshot(&self) -> Self::Snapshot {
+        fn to_snapshot(&self) -> Self::Snapshot {
             self.clone()
         }
     }
@@ -132,28 +125,9 @@ mod tests {
         name: String,
     }
 
-    pub fn increment(syzygy: &mut Syzygy<TestModel>) -> Effects<TestModel> {
+    fn increment(syzygy: &mut Syzygy<TestModel>) {
         syzygy.model_mut().counter += 1;
-        Effects::none()
     }
-
-    // impl Task<TestModel> for IncrementTask {
-    //     fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Batch<TestModel> {
-    //         std::thread::spawn(|| println!("hello from thread task"));
-    //         Batch::none().and_then_cmd(IncrementCmd)
-    //     }
-    // }
-
-    // #[derive(Debug)]
-    // pub struct IncrementAsyncTask;
-
-    // #[async_trait]
-    // impl AsyncTask<TestModel> for IncrementAsyncTask {
-    //     async fn run(self: Box<Self>, ctx: AsyncContext<TestModel>) -> Batch<TestModel> {
-    //         tokio::spawn(async { println!("hello from async task") });
-    //         Batch::none().and_then_cmd(IncrementCmd)
-    //     }
-    // }
 
     #[cfg(not(feature = "parallel"))]
     #[tokio::test]
@@ -228,68 +202,61 @@ mod tests {
         let rx = syzygy.dispatch_sync(increment);
 
         syzygy.handle_effects();
-        rx.blocking_recv().unwrap();
+        rx.await.unwrap();
 
         assert_eq!(syzygy.model().counter, 1);
     }
     #[cfg(not(feature = "parallel"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_thread_task() {
-        use crate::dispatch::ThreadTask;
-
         let model = TestModel { counter: 0 };
-        let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
+        let mut cx: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
-        let effects = Effects::new()
-            .spawn(|_| {
-                println!("hello from thread task 1");
-                1
-            })
-            .perform(|_x| Effects::from(increment))
-            .effect(
-                ThreadTask::new(|_| println!("hello from thread task 2"))
-                    .and_then(|_| println!("hello from thread task 3"))
-                    .perform(|_| {
-                        println!("before increment ");
-                        Effects::from(increment)
-                    }),
-            );
-        syzygy.dispatch(effects);
+        cx.spawn(|cx| {
+            println!("hello from thread task 1");
+            cx.dispatch(increment);
+        });
 
-        syzygy.handle_effects();
+        cx.spawn(|cx| {
+            println!("hello from thread task 2");
+            cx.dispatch(increment);
+        });
+
+        cx.handle_effects();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        syzygy.handle_effects();
-        syzygy.handle_effects();
-        syzygy.handle_effects();
+        cx.handle_effects();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cx.handle_effects();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cx.handle_effects();
 
-        assert_eq!(syzygy.model().counter, 2);
+        assert_eq!(cx.model().counter, 2);
     }
     #[cfg(not(feature = "parallel"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_async_task() {
-        use crate::dispatch::AsyncTask;
-
         let model = TestModel { counter: 0 };
         let mut syzygy: Syzygy<TestModel> = Syzygy::builder().model(model).build();
 
-        let effects = Effects::new()
-            .task(async |_| println!("hello from thread task 1"))
-            .perform(|_| {
-                println!("hello form perform 1");
-                Effects::new().effect(increment)
-            })
-            .task(async |_| println!("hello from thread task 2"))
-            .perform(|_| {
-                println!("hello form perform 2");
-                Effects::new().effect(increment)
-            });
+        // First async task
+        syzygy.task(|cx| async move {
+            println!("hello from thread task 1");
+            cx.dispatch(increment);
+        });
 
-        syzygy.dispatch(effects);
+        // Second async task
+        syzygy.task(|cx| async move {
+            println!("hello from thread task 2");
+            cx.dispatch(increment);
+        });
 
+        // Handle effects with some delay to allow tasks to complete
         syzygy.handle_effects();
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(100));
         syzygy.handle_effects();
+        std::thread::sleep(std::time::Duration::from_millis(100));
         syzygy.handle_effects();
+        std::thread::sleep(std::time::Duration::from_millis(100));
         syzygy.handle_effects();
 
         assert_eq!(syzygy.model().counter, 2);
@@ -723,7 +690,7 @@ mod tests {
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                syzygy.dispatch(|_: &mut Syzygy<TestModel>| Effects::none());
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {});
             }
             syzygy.handle_effects();
             let duration = start.elapsed();
@@ -736,18 +703,10 @@ mod tests {
         for _ in 0..RUNS {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
-                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
-                    Effects::<TestModel>::none().effect(|_| Effects::none())
-                });
-                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
-                    Effects::<TestModel>::none().effect(|_| Effects::none())
-                });
-                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
-                    Effects::<TestModel>::none().effect(|_| Effects::none())
-                });
-                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {
-                    Effects::<TestModel>::none().effect(|_| Effects::none())
-                });
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {});
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {});
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {});
+                syzygy.dispatch(|_: &mut Syzygy<TestModel>| {});
                 syzygy.handle_effects();
             }
             let duration = start.elapsed();
@@ -762,7 +721,6 @@ mod tests {
             for _ in 0..ITERATIONS {
                 syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
                     cx.model_mut().counter += 1;
-                    Effects::none()
                 });
             }
             syzygy.handle_effects();
@@ -777,39 +735,14 @@ mod tests {
             let start = Instant::now();
             for _ in 0..ITERATIONS {
                 syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
-                    Effects::<TestModel>::none()
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            cx.model_mut().counter += 1;
-                            Effects::none()
-                        })
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
+                    cx.dispatch(|cx| cx.model_mut().counter += 1);
                 });
             }
             syzygy.handle_effects();
@@ -826,44 +759,38 @@ mod tests {
                 syzygy.dispatch(|cx: &mut Syzygy<TestModel>| {
                     // Simulate a more complex real-world scenario with
                     // multiple branching effects and state updates
-                    let effect = Effects::<TestModel>::none();
 
                     // Update some base state
                     cx.model_mut().counter += 1;
 
                     // Chain some conditional effects
-                    effect
-                        .effect(|cx| {
-                            if cx.model().counter % 2 == 0 {
-                                cx.model_mut().counter += 2;
-                                Effects::<TestModel>::none().effect(|cx| {
-                                    cx.model_mut().counter *= 2;
-                                    Effects::none()
-                                })
-                            } else {
-                                cx.model_mut().counter -= 1;
-                                Effects::<TestModel>::none().effect(|cx| {
-                                    cx.model_mut().counter += 5;
-                                    Effects::none()
-                                })
-                            }
-                        })
-                        .effect(|cx| {
-                            // Another conditional branch
-                            if cx.model().counter > 100 {
-                                cx.model_mut().counter = 0;
-                            }
-                            Effects::none()
-                        })
-                        .effect(|cx| {
-                            // Simulate some expensive computation
-                            let mut total = 0;
-                            for i in 0..cx.model().counter {
-                                total += i;
-                            }
-                            cx.model_mut().counter = total;
-                            Effects::none()
-                        })
+                    if cx.model().counter % 2 == 0 {
+                        cx.model_mut().counter += 2;
+                        cx.dispatch(|cx| {
+                            cx.model_mut().counter *= 2;
+                        });
+                    } else {
+                        cx.model_mut().counter -= 1;
+                        cx.dispatch(|cx| {
+                            cx.model_mut().counter += 5;
+                        });
+                    }
+
+                    // Another conditional branch
+                    cx.dispatch(|cx| {
+                        if cx.model().counter > 100 {
+                            cx.model_mut().counter = 0;
+                        }
+                    });
+
+                    // Simulate some expensive computation
+                    cx.dispatch(|cx| {
+                        let mut total = 0;
+                        for i in 0..cx.model().counter {
+                            total += i;
+                        }
+                        cx.model_mut().counter = total;
+                    });
                 });
             }
             syzygy.handle_effects();
@@ -900,37 +827,37 @@ mod tests {
         println!("  Speed: {ops_real:.2} ops/sec");
         println!();
     }
-    #[cfg(not(feature = "parallel"))]
-    #[tokio::test]
-    async fn test_task_performance() {
-        use crate::dispatch::AsyncTask;
-        use std::time::Instant;
+    // #[cfg(not(feature = "parallel"))]
+    // #[tokio::test]
+    // async fn test_task_performance() {
+    //     use crate::dispatch::AsyncTask;
+    //     use std::time::Instant;
 
-        let model = TestModel { counter: 0 };
-        let mut syzygy = Syzygy::builder().model(model.clone()).build();
+    //     let model = TestModel { counter: 0 };
+    //     let mut syzygy = Syzygy::builder().model(model.clone()).build();
 
-        const ITERATIONS: usize = 1_000_000;
-        const RUNS: usize = 10;
+    //     const ITERATIONS: usize = 1_000_000;
+    //     const RUNS: usize = 10;
 
-        let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                let effects = Effects::new()
-                    .task(async |_| ())
-                    .perform(|_| Effects::from(increment));
-                syzygy.dispatch(effects);
-            }
-            syzygy.handle_effects();
-            let duration = start.elapsed();
-            best_dispatch = best_dispatch.min(duration);
-        }
-        let ops_dispatch = ITERATIONS as f64 / best_dispatch.as_secs_f64();
+    //     let mut best_dispatch = std::time::Duration::from_secs(u64::MAX);
+    //     for _ in 0..RUNS {
+    //         let start = Instant::now();
+    //         for _ in 0..ITERATIONS {
+    //             let effects = Effects::new()
+    //                 .task(async |_| ())
+    //                 .perform(|_| Effects::from(increment));
+    //             syzygy.dispatch(effects);
+    //         }
+    //         syzygy.handle_effects();
+    //         let duration = start.elapsed();
+    //         best_dispatch = best_dispatch.min(duration);
+    //     }
+    //     let ops_dispatch = ITERATIONS as f64 / best_dispatch.as_secs_f64();
 
-        println!(
-            "Task dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)"
-        );
-    }
+    //     println!(
+    //         "Task dispatch: {ITERATIONS} iterations in {best_dispatch:?} ({ops_dispatch:.2} ops/sec)"
+    //     );
+    // }
     #[cfg(all(not(feature = "async"), not(feature = "parallel")))]
     #[tokio::test]
     async fn benchmark_direct_model_update() {

@@ -6,7 +6,7 @@ mod unsync;
 
 pub trait Model: fmt::Debug + Send + Sync + 'static {
     type Snapshot: Clone + Send + Sync + 'static;
-    fn into_snapshot(&self) -> Self::Snapshot;
+    fn to_snapshot(&self) -> Self::Snapshot;
 }
 
 pub trait ModelAccess: Context {

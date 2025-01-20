@@ -19,14 +19,9 @@ tokio = { version = "1.4", features = ["full"] }
 downcast-rs = "1.2"
 log = "0.4"
 bon = "3.3.0"
-arc-swap = "1.7.1"
 derive_more = {version = "1.0.0", features = ["full"]}
-dyn-clone = "1.0.17"
 async-trait = "0.1.85"
 crossbeam-channel = "0.5.14"
-crossbeam-queue = "0.3.12"
-object-pool = "0.6.0"
-smallvec = {version = "2.0.0-alpha.9", features = ["specialization"]}
 arrayvec = "0.7.6"
 
 [dev-dependencies]

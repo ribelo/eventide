@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use crate::{
+    dispatch::EffectsTx,
     model::{Model, ModelSnapshotAccess, ModelSnapshotCreate},
+    prelude::DispatchEffect,
     resource::{ResourceAccess, Resources},
     syzygy::Syzygy,
 };
@@ -10,8 +14,9 @@ use super::{Context, FromContext};
 
 #[derive(Debug, Builder)]
 pub struct AsyncContext<M: Model> {
-    pub model_snapshot: M::Snapshot,
-    pub resources: Resources,
+    model_snapshot: Arc<M::Snapshot>,
+    resources: Resources,
+    effects_tx: EffectsTx<M>,
 }
 
 impl<M: Model> Context for AsyncContext<M> {
@@ -23,6 +28,7 @@ impl<M: Model> Clone for AsyncContext<M> {
         Self {
             model_snapshot: self.model_snapshot.clone(),
             resources: self.resources.clone(),
+            effects_tx: self.effects_tx.clone(),
         }
     }
 }
@@ -30,8 +36,9 @@ impl<M: Model> Clone for AsyncContext<M> {
 impl<M: Model> FromContext<Syzygy<M>> for AsyncContext<M> {
     fn from_context(context: &Syzygy<M>) -> Self {
         Self {
-            model_snapshot: context.model.into_snapshot(),
+            model_snapshot: Arc::new(context.model.to_snapshot()),
             resources: context.resources().clone(),
+            effects_tx: context.effects_bus.tx.clone(),
         }
     }
 }
@@ -52,13 +59,19 @@ impl<M: Model> ModelSnapshotAccess for AsyncContext<M> {
 }
 
 impl<M: Model> ModelSnapshotCreate for AsyncContext<M> {
-    fn create_snapshot(&self) -> <<Self as Context>::Model as Model>::Snapshot {
-        self.model_snapshot.clone()
+    fn create_snapshot(&self) -> <M as Model>::Snapshot {
+        (*self.model_snapshot).clone()
     }
 }
 
 impl<M: Model> ResourceAccess for AsyncContext<M> {
     fn resources(&self) -> &Resources {
         &self.resources
+    }
+}
+
+impl<M: Model> DispatchEffect for AsyncContext<M> {
+    fn effects_tx(&self) -> &EffectsTx<M> {
+        &self.effects_tx
     }
 }
